@@ -1,11 +1,9 @@
-using ARMeilleure.CodeGen;
 using ARMeilleure.Common;
 using ARMeilleure.Decoders;
 using ARMeilleure.Diagnostics;
 using ARMeilleure.Instructions;
 using ARMeilleure.IntermediateRepresentation;
 using ARMeilleure.Memory;
-using ARMeilleure.Signal;
 using ARMeilleure.State;
 using ARMeilleure.Translation.Cache;
 using ARMeilleure.Translation.PTC;
@@ -14,34 +12,24 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Reflection;
+using System.Runtime;
 using System.Threading;
-using static ARMeilleure.IntermediateRepresentation.Operand.Factory;
+
+using static ARMeilleure.Common.BitMapPool;
+using static ARMeilleure.IntermediateRepresentation.OperandHelper;
+using static ARMeilleure.IntermediateRepresentation.OperationHelper;
 
 namespace ARMeilleure.Translation
 {
     public class Translator
     {
-        private static readonly AddressTable<ulong>.Level[] Levels64Bit =
-            new AddressTable<ulong>.Level[]
-            {
-                new(31, 17),
-                new(23,  8),
-                new(15,  8),
-                new( 7,  8),
-                new( 2,  5)
-            };
-
-        private static readonly AddressTable<ulong>.Level[] Levels32Bit =
-            new AddressTable<ulong>.Level[]
-            {
-                new(31, 17),
-                new(23,  8),
-                new(15,  8),
-                new( 7,  8),
-                new( 1,  6)
-            };
+        private const int CountTableCapacity = 4 * 1024 * 1024;
 
         private readonly IJitMemoryAllocator _allocator;
+        private readonly IMemoryManager _memory;
+
+        private readonly ConcurrentDictionary<ulong, TranslatedFunction> _funcs;
         private readonly ConcurrentQueue<KeyValuePair<ulong, TranslatedFunction>> _oldFuncs;
 
         private readonly ConcurrentDictionary<ulong, object> _backgroundSet;
@@ -49,22 +37,21 @@ namespace ARMeilleure.Translation
         private readonly AutoResetEvent _backgroundTranslatorEvent;
         private readonly ReaderWriterLock _backgroundTranslatorLock;
 
-        internal ConcurrentDictionary<ulong, TranslatedFunction> Functions { get; }
-        internal AddressTable<ulong> FunctionTable { get; }
+        private JumpTable _jumpTable;
+        internal JumpTable JumpTable => _jumpTable;
         internal EntryTable<uint> CountTable { get; }
-        internal TranslatorStubs Stubs { get; }
-        internal IMemoryManager Memory { get; }
 
         private volatile int _threadCount;
 
         // FIXME: Remove this once the init logic of the emulator will be redone.
         public static readonly ManualResetEvent IsReadyForTranslation = new(false);
 
-        public Translator(IJitMemoryAllocator allocator, IMemoryManager memory, bool for64Bits)
+        public Translator(IJitMemoryAllocator allocator, IMemoryManager memory)
         {
             _allocator = allocator;
-            Memory = memory;
+            _memory = memory;
 
+            _funcs = new ConcurrentDictionary<ulong, TranslatedFunction>();
             _oldFuncs = new ConcurrentQueue<KeyValuePair<ulong, TranslatedFunction>>();
 
             _backgroundSet = new ConcurrentDictionary<ulong, object>();
@@ -72,19 +59,11 @@ namespace ARMeilleure.Translation
             _backgroundTranslatorEvent = new AutoResetEvent(false);
             _backgroundTranslatorLock = new ReaderWriterLock();
 
+            CountTable = new EntryTable<uint>();
+
             JitCache.Initialize(allocator);
 
-            CountTable = new EntryTable<uint>();
-            Functions = new ConcurrentDictionary<ulong, TranslatedFunction>();
-            FunctionTable = new AddressTable<ulong>(for64Bits ? Levels64Bit : Levels32Bit);
-            Stubs = new TranslatorStubs(this);
-
-            FunctionTable.Fill = (ulong)Stubs.SlowDispatchStub;
-
-            if (memory.Type.IsHostMapped())
-            {
-                NativeSignalHandler.InitializeSignalHandler();
-            }
+            DirectCallStubs.InitializeStubs();
         }
 
         private void TranslateStackedSubs()
@@ -96,20 +75,26 @@ namespace ARMeilleure.Translation
                 if (_backgroundStack.TryPop(out RejitRequest request) && 
                     _backgroundSet.TryRemove(request.Address, out _))
                 {
-                    TranslatedFunction func = Translate(request.Address, request.Mode, highCq: true);
+                    TranslatedFunction func = Translate(
+                        _memory,
+                        _jumpTable,
+                        CountTable,
+                        request.Address,
+                        request.Mode,
+                        highCq: true);
 
-                    Functions.AddOrUpdate(request.Address, func, (key, oldFunc) =>
+                    _funcs.AddOrUpdate(request.Address, func, (key, oldFunc) =>
                     {
                         EnqueueForDeletion(key, oldFunc);
                         return func;
                     });
 
+                    _jumpTable.RegisterFunction(request.Address, func);
+
                     if (PtcProfiler.Enabled)
                     {
                         PtcProfiler.UpdateEntry(request.Address, request.Mode, highCq: true);
                     }
-
-                    RegisterFunction(request.Address, func);
 
                     _backgroundTranslatorLock.ReleaseReaderLock();
                 }
@@ -130,11 +115,14 @@ namespace ARMeilleure.Translation
             {
                 IsReadyForTranslation.WaitOne();
 
+                Debug.Assert(_jumpTable == null);
+                _jumpTable = new JumpTable(_allocator);
+
                 if (Ptc.State == PtcState.Enabled)
                 {
-                    Debug.Assert(Functions.Count == 0);
-                    Ptc.LoadTranslations(this);
-                    Ptc.MakeAndSaveTranslations(this);
+                    Debug.Assert(_funcs.Count == 0);
+                    Ptc.LoadTranslations(_funcs, _memory, _jumpTable, CountTable);
+                    Ptc.MakeAndSaveTranslations(_funcs, _memory, _jumpTable, CountTable);
                 }
 
                 PtcProfiler.Start();
@@ -163,24 +151,21 @@ namespace ARMeilleure.Translation
 
                     backgroundTranslatorThread.Start();
                 }
+
+                InstallWatchers();
+
+                MHRiseHooks.LoadFileList();
             }
 
             Statistics.InitializeTimer();
 
-            NativeInterface.RegisterThread(context, Memory, this);
+            NativeInterface.RegisterThread(context, _memory, this);
 
-            if (Optimizations.UseUnmanagedDispatchLoop)
+            do
             {
-                Stubs.DispatchLoop(context.NativeContextPtr, address);
+                address = ExecuteSingle(context, address);
             }
-            else
-            {
-                do
-                {
-                    address = ExecuteSingle(context, address);
-                }
-                while (context.Running && address != 0);
-            }
+            while (context.Running && address != 0);
 
             NativeInterface.UnregisterThread();
 
@@ -190,9 +175,14 @@ namespace ARMeilleure.Translation
 
                 ClearJitCache();
 
-                Stubs.Dispose();
-                FunctionTable.Dispose();
+                DisposePools();
+
+                _jumpTable.Dispose();
+                _jumpTable = null;
+
                 CountTable.Dispose();
+
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             }
         }
 
@@ -211,55 +201,53 @@ namespace ARMeilleure.Translation
 
         internal TranslatedFunction GetOrTranslate(ulong address, ExecutionMode mode)
         {
-            if (!Functions.TryGetValue(address, out TranslatedFunction func))
+            if (!_funcs.TryGetValue(address, out TranslatedFunction func))
             {
-                func = Translate(address, mode, highCq: false);
+                func = Translate(_memory, _jumpTable, CountTable, address, mode, highCq: false);
 
-                TranslatedFunction oldFunc = Functions.GetOrAdd(address, func);
+                TranslatedFunction getFunc = _funcs.GetOrAdd(address, func);
 
-                if (oldFunc != func)
+                if (getFunc != func)
                 {
                     JitCache.Unmap(func.FuncPtr);
-                    func = oldFunc;
+                    func = getFunc;
                 }
 
                 if (PtcProfiler.Enabled)
                 {
                     PtcProfiler.AddEntry(address, mode, highCq: false);
                 }
-
-                RegisterFunction(address, func);
             }
 
             return func;
         }
 
-        internal void RegisterFunction(ulong guestAddress, TranslatedFunction func)
+        internal static TranslatedFunction Translate(
+            IMemoryManager memory,
+            JumpTable jumpTable,
+            EntryTable<uint> countTable,
+            ulong address,
+            ExecutionMode mode,
+            bool highCq)
         {
-            if (FunctionTable.IsValid(guestAddress) && (Optimizations.AllowLcqInFunctionTable || func.HighCq))
-            {
-                Volatile.Write(ref FunctionTable.GetValue(guestAddress), (ulong)func.FuncPtr);
-            }
-        }
-
-        internal TranslatedFunction Translate(ulong address, ExecutionMode mode, bool highCq)
-        {
-            var context = new ArmEmitterContext(
-                Memory,
-                CountTable,
-                FunctionTable,
-                Stubs,
-                address,
-                highCq,
-                mode: Aarch32Mode.User);
+            var context = new ArmEmitterContext(memory, jumpTable, countTable, address, highCq, Aarch32Mode.User);
 
             Logger.StartPass(PassName.Decoding);
 
-            Block[] blocks = Decoder.Decode(Memory, address, mode, highCq, singleBlock: false);
+            Block[] blocks = Decoder.Decode(memory, address, mode, highCq, singleBlock: false);
 
             Logger.EndPass(PassName.Decoding);
 
+            PreparePool(highCq ? 1 : 0);
+
             Logger.StartPass(PassName.Translation);
+
+            Counter<uint> counter = null;
+
+            if (!context.HighCq)
+            {
+                EmitRejitCheck(context, out counter);
+            }
 
             EmitSynchronization(context);
 
@@ -268,11 +256,11 @@ namespace ARMeilleure.Translation
                 context.Branch(context.GetLabel(address));
             }
 
-            ControlFlowGraph cfg = EmitAndGetCFG(context, blocks, out Range funcRange, out Counter<uint> counter);
+            ControlFlowGraph cfg = EmitAndGetCFG(context, blocks, out Range funcRange);
 
             ulong funcSize = funcRange.End - funcRange.Start;
 
-            Logger.EndPass(PassName.Translation, cfg);
+            Logger.EndPass(PassName.Translation);
 
             Logger.StartPass(PassName.RegisterUsage);
 
@@ -280,30 +268,51 @@ namespace ARMeilleure.Translation
 
             Logger.EndPass(PassName.RegisterUsage);
 
-            var retType = OperandType.I64;
-            var argTypes = new OperandType[] { OperandType.I64 };
+            OperandType[] argTypes = new OperandType[] { OperandType.I64 };
 
-            var options = highCq ? CompilerOptions.HighCq : CompilerOptions.None;
+            CompilerOptions options = highCq ? CompilerOptions.HighCq : CompilerOptions.None;
 
-            if (context.HasPtc)
+            GuestFunction func;
+
+            if (Ptc.State == PtcState.Disabled)
             {
-                options |= CompilerOptions.Relocatable;
+                func = Compiler.Compile<GuestFunction>(cfg, argTypes, OperandType.I64, options);
+
+                ResetPool(highCq ? 1 : 0);
             }
-
-            CompiledFunction compiledFunc = Compiler.Compile(cfg, argTypes, retType, options);
-
-            if (context.HasPtc)
+            else
             {
-                Hash128 hash = Ptc.ComputeHash(Memory, address, funcSize);
+                using PtcInfo ptcInfo = new PtcInfo();
 
-                Ptc.WriteCompiledFunction(address, funcSize, hash, highCq, compiledFunc);
+                func = Compiler.Compile<GuestFunction>(cfg, argTypes, OperandType.I64, options, ptcInfo);
+
+                ResetPool(highCq ? 1 : 0);
+
+                Hash128 hash = Ptc.ComputeHash(memory, address, funcSize);
+
+                Ptc.WriteInfoCodeRelocUnwindInfo(address, funcSize, hash, highCq, ptcInfo);
             }
-
-            GuestFunction func = compiledFunc.Map<GuestFunction>();
-
-            Allocators.ResetAll();
 
             return new TranslatedFunction(func, counter, funcSize, highCq);
+        }
+
+        internal static void PreparePool(int groupId = 0)
+        {
+            PrepareOperandPool(groupId);
+            PrepareOperationPool(groupId);
+        }
+
+        internal static void ResetPool(int groupId = 0)
+        {
+            ResetOperationPool(groupId);
+            ResetOperandPool(groupId);
+        }
+
+        internal static void DisposePools()
+        {
+            DisposeOperandPools();
+            DisposeOperationPools();
+            DisposeBitMapPools();
         }
 
         private struct Range
@@ -318,14 +327,8 @@ namespace ARMeilleure.Translation
             }
         }
 
-        private static ControlFlowGraph EmitAndGetCFG(
-            ArmEmitterContext context,
-            Block[] blocks,
-            out Range range,
-            out Counter<uint> counter)
+        private static ControlFlowGraph EmitAndGetCFG(ArmEmitterContext context, Block[] blocks, out Range range)
         {
-            counter = null;
-
             ulong rangeStart = ulong.MaxValue;
             ulong rangeEnd = 0;
 
@@ -346,22 +349,13 @@ namespace ARMeilleure.Translation
                     }
                 }
 
-                if (block.Address == context.EntryAddress && !context.HighCq)
-                {
-                    EmitRejitCheck(context, out counter);
-                }
-
                 context.CurrBlock = block;
 
                 context.MarkLabel(context.GetLabel(block.Address));
 
                 if (block.Exit)
                 {
-                    // Left option here as it may be useful if we need to return to managed rather than tail call in
-                    // future. (eg. for debug)
-                    bool useReturns = false;
-
-                    InstEmitFlowHelper.EmitVirtualJump(context, Const(block.Address), isReturn: useReturns);
+                    InstEmitFlowHelper.EmitTailContinue(context, Const(block.Address));
                 }
                 else
                 {
@@ -378,7 +372,7 @@ namespace ARMeilleure.Translation
                             EmitSynchronization(context);
                         }
 
-                        Operand lblPredicateSkip = default;
+                        Operand lblPredicateSkip = null;
 
                         if (opCode is OpCode32 op && op.Cond < Condition.Al)
                         {
@@ -396,7 +390,7 @@ namespace ARMeilleure.Translation
                             throw new InvalidOperationException($"Invalid instruction \"{opCode.Instruction.Name}\".");
                         }
 
-                        if (lblPredicateSkip != default)
+                        if (lblPredicateSkip != null)
                         {
                             context.MarkLabel(lblPredicateSkip);
                         }
@@ -417,10 +411,7 @@ namespace ARMeilleure.Translation
 
             Operand lblEnd = Label();
 
-            Operand address = !context.HasPtc ?
-                Const(ref counter.Value) :
-                Const(ref counter.Value, Ptc.CountTableSymbol);
-
+            Operand address = Const(ref counter.Value, Ptc.CountTableIndex);
             Operand curCount = context.Load(OperandType.I32, address);
             Operand count = context.Add(curCount, Const(1));
             context.Store(address, count);
@@ -481,14 +472,14 @@ namespace ARMeilleure.Translation
             // Ensure no attempt will be made to compile new functions due to rejit.
             ClearRejitQueue(allowRequeue: false);
 
-            foreach (var func in Functions.Values)
+            foreach (var func in _funcs.Values)
             {
                 JitCache.Unmap(func.FuncPtr);
 
                 func.CallCounter?.Dispose();
             }
 
-            Functions.Clear();
+            _funcs.Clear();
 
             while (_oldFuncs.TryDequeue(out var kv))
             {
@@ -506,7 +497,7 @@ namespace ARMeilleure.Translation
             {
                 while (_backgroundStack.TryPop(out var request))
                 {
-                    if (Functions.TryGetValue(request.Address, out var func) && func.CallCounter != null)
+                    if (_funcs.TryGetValue(request.Address, out var func) && func.CallCounter != null)
                     {
                         Volatile.Write(ref func.CallCounter.Value, 0);
                     }
@@ -520,6 +511,168 @@ namespace ARMeilleure.Translation
             }
 
             _backgroundTranslatorLock.ReleaseWriterLock();
+        }
+
+        private MHRiseHooks _hooks;
+
+        private void InstallWatchers()
+        {
+            _hooks = new MHRiseHooks(_memory);
+
+            AddWatcher(MHRiseHooks.MHRiseFileHookAddress, typeof(MHRiseHooks).GetMethod(nameof(MHRiseHooks.FileRelatedMurmurHash)), _hooks);
+        }
+
+        public void AddWatcher(ulong address, MethodInfo meth, object instance = null)
+        {
+            bool isReplacement = false;
+
+            GuestFunction funcDlg;
+
+            if (!isReplacement)
+            {
+                TranslatedFunction funcToCall = GetOrTranslate(address, ExecutionMode.Aarch64);
+
+                if (funcToCall.IsHook)
+                {
+                    return;
+                }
+
+                funcDlg = BuildWatcher(funcToCall, meth, instance);
+            }
+            else
+            {
+                funcDlg = BuildWatcher(null, meth, instance);
+            }
+
+            Counter<uint> callCounter = null; // needs checks, just used to make the project compile
+            TranslatedFunction func = new TranslatedFunction(funcDlg, callCounter, 0UL, true, true);
+
+            _funcs.AddOrUpdate(address, func, (key, oldFunc) => func);
+        }
+
+        private GuestFunction BuildWatcher(TranslatedFunction func, MethodInfo meth, object instance)
+        {
+            EmitterContext context = new EmitterContext();
+
+            ParameterInfo[] callbackArgs = meth.GetParameters();
+
+            Operand arg0 = context.LoadArgument(OperandType.I64, 0);
+
+            Operand[] args = new Operand[callbackArgs.Length];
+
+            int retValueArgIndex = -1;
+
+            void SetArgument(int index, int regIndex)
+            {
+                OperandType type = GetOperandType(callbackArgs[index].ParameterType);
+
+                RegisterType regType = type.IsInteger()
+                    ? RegisterType.Integer
+                    : RegisterType.Vector;
+
+                long offset = NativeContext.GetRegisterOffset(new Register(regIndex, regType));
+
+                Operand value = context.Load(type, context.Add(arg0, Const(offset)));
+
+                args[index] = value;
+            }
+
+            int intRegisters = 0, vecRegisters = 0;
+
+            for (int index = 0; index < callbackArgs.Length; index++)
+            {
+                OperandType type = GetOperandType(callbackArgs[index].ParameterType);
+
+                var retValueAttr = callbackArgs[index].GetCustomAttribute(typeof(ReturnValueAttribute));
+
+                if (retValueAttr != null)
+                {
+                    retValueArgIndex = index;
+
+                    continue;
+                }
+
+                int regIndex = type.IsInteger() ? intRegisters++ : vecRegisters++;
+
+                SetArgument(index, regIndex);
+            }
+
+            Operand x0;
+
+            if (func != null)
+            {
+                Operand retVal = context.Call(Const(func.FuncPtr.ToInt64()), OperandType.I64, arg0);
+
+                if (retValueArgIndex != -1)
+                {
+                    SetArgument(retValueArgIndex, 0);
+                }
+
+                x0 = context.Call(meth, instance, args);
+
+                context.Return(retVal);
+            }
+            else
+            {
+                x0 = context.Call(meth, instance, args);
+
+                long offset = NativeContext.GetRegisterOffset(new Register(30, RegisterType.Integer));
+
+                Operand value = context.Load(OperandType.I64, context.Add(arg0, Const(offset)));
+
+                context.Return(value);
+            }
+
+            // Write back the return value of the hook function.
+            if (x0 != null)
+            {
+                long offset = NativeContext.GetRegisterOffset(new Register(0, x0.Type.ToRegisterType()));
+
+                context.Store(context.Add(arg0, Const(offset)), x0);
+            }
+
+            OperandType[] argTypes = new OperandType[] { OperandType.I64 };
+
+            return Compiler.Compile<GuestFunction>(
+                context.GetControlFlowGraph(),
+                argTypes,
+                OperandType.I64,
+                CompilerOptions.HighCq);
+        }
+
+        private static Dictionary<TypeCode, OperandType> _typeCodeToOperandTypeMap =
+                   new Dictionary<TypeCode, OperandType>()
+        {
+            { TypeCode.Boolean, OperandType.I32  },
+            { TypeCode.Byte,    OperandType.I32  },
+            { TypeCode.Char,    OperandType.I32  },
+            { TypeCode.Double,  OperandType.FP64 },
+            { TypeCode.Int16,   OperandType.I32  },
+            { TypeCode.Int32,   OperandType.I32  },
+            { TypeCode.Int64,   OperandType.I64  },
+            { TypeCode.SByte,   OperandType.I32  },
+            { TypeCode.Single,  OperandType.FP32 },
+            { TypeCode.UInt16,  OperandType.I32  },
+            { TypeCode.UInt32,  OperandType.I32  },
+            { TypeCode.UInt64,  OperandType.I64  }
+        };
+
+        private static OperandType GetOperandType(Type type)
+        {
+            if (_typeCodeToOperandTypeMap.TryGetValue(Type.GetTypeCode(type), out OperandType ot))
+            {
+                return ot;
+            }
+            else if (type == typeof(V128))
+            {
+                return OperandType.V128;
+            }
+            else if (type == typeof(void))
+            {
+                return OperandType.None;
+            }
+
+            throw new ArgumentException($"Invalid type \"{type.Name}\".");
         }
     }
 }
