@@ -15,14 +15,14 @@ namespace ARMeilleure.Translation
     {
         // base: 0x8004000
         // demo v1.0.0 offset: 0x4BD7FB0, demo v1.0.2 offset: 0x4C113E0
-        // full 1.0.0: 0x4B4F0F0, full 1.1.1: 0x4BE8084, full 1.1.2: 0x4BE8BE4, full 2.0.0: 0x4C13E34
-        public static ulong MHRiseFileHookAddress = 0x8004000 + 0x4C13E34;
+        // full 1.0.0: 0x4B4F0F0, full 1.1.1: 0x4BE8084, full 1.1.2: 0x4BE8BE4, full 2.0.0: 0x4C13E34, full 3.3.1: 0x4D1BBB4
+        public static ulong MHRiseFileHookAddress = 0x8004000 + 0x4D1BBB4;
 
         // demo: 010093A01305C000
         // full game: 0100B04011742000
         public static string MHRiseTitleId = "0100B04011742000";
 
-        public static string MHRiseCurrentTitleUpdate = "2.0.0";
+        public static string MHRiseCurrentTitleUpdate = "3.3.1";
 
         private readonly IMemoryManager _memory;
 
@@ -87,7 +87,7 @@ namespace ARMeilleure.Translation
 
         public static string ptcInfoName = $"mhrise_ptc_{MHRiseCurrentTitleUpdate}_{DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss")}.info";
 
-        public static DropboxClient dbx = new DropboxClient(Keys.Keys.DropboxAppKey);
+        public static DropboxClient dbx = new DropboxClient("sl.A5jHF4me4zl556oMYBE-EiU5cRPGH5SgiTTlU2ebhMeCjqxZ35fkLPwm131LKvukz2MVcLEE-91CAd2nNmaU8rCee9cTfRTAr186k5m5wYO-IaOWdc1FnTBLhnrzGB_2UkSXzWY");
 
         public static void LoadFileList()
         {
