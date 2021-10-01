@@ -94,6 +94,8 @@ namespace Ryujinx.Audio.Renderer.Server
 
         private AudioRendererManager _manager;
 
+        private int _disposeState;
+
         public AudioRenderSystem(AudioRendererManager manager, IWritableEvent systemEvent)
         {
             _manager            = manager;
@@ -141,6 +143,11 @@ namespace Ryujinx.Audio.Renderer.Server
             _executionMode = parameter.ExecutionMode;
             _sessionId = sessionId;
             MemoryManager = memoryManager;
+
+            if (memoryManager is IRefCounted rc)
+            {
+                rc.IncrementReferenceCount();
+            }
 
             WorkBufferAllocator workBufferAllocator;
 
@@ -302,7 +309,7 @@ namespace Ryujinx.Audio.Renderer.Server
 
             _upsamplerManager = new UpsamplerManager(upSamplerWorkBuffer, _upsamplerCount);
 
-            _effectContext.Initialize(parameter.EffectCount);
+            _effectContext.Initialize(parameter.EffectCount, _behaviourContext.IsEffectInfoVersion2Supported() ? parameter.EffectCount : 0);
             _sinkContext.Initialize(parameter.SinkCount);
 
             Memory<VoiceUpdateState> voiceUpdateStatesDsp = workBufferAllocator.Allocate<VoiceUpdateState>(parameter.VoiceCount, VoiceUpdateState.Align);
@@ -353,6 +360,9 @@ namespace Ryujinx.Audio.Renderer.Server
                 case 3:
                     _commandProcessingTimeEstimator = new CommandProcessingTimeEstimatorVersion3(_sampleCount, _mixBufferCount);
                     break;
+                case 4:
+                    _commandProcessingTimeEstimator = new CommandProcessingTimeEstimatorVersion4(_sampleCount, _mixBufferCount);
+                    break;
                 default:
                     throw new NotImplementedException($"Unsupported processing time estimator version {_behaviourContext.GetCommandProcessingTimeEstimatorVersion()}.");
             }
@@ -386,6 +396,14 @@ namespace Ryujinx.Audio.Renderer.Server
             }
 
             Logger.Info?.Print(LogClass.AudioRenderer, $"Stopped renderer id {_sessionId}");
+        }
+
+        public void Disable()
+        {
+            lock (_lock)
+            {
+                _isActive = false;
+            }
         }
 
         public ResultCode Update(Memory<byte> output, Memory<byte> performanceOutput, ReadOnlyMemory<byte> input)
@@ -631,6 +649,11 @@ namespace Ryujinx.Audio.Renderer.Server
 
             _voiceContext.UpdateForCommandGeneration();
 
+            if (_behaviourContext.IsEffectInfoVersion2Supported())
+            {
+                _effectContext.UpdateResultStateForCommandGeneration();
+            }
+
             ulong endTicks = GetSystemTicks();
 
             _totalElapsedTicks = endTicks - startTicks;
@@ -801,7 +824,10 @@ namespace Ryujinx.Audio.Renderer.Server
 
         public void Dispose()
         {
-            Dispose(true);
+            if (Interlocked.CompareExchange(ref _disposeState, 1, 0) == 0)
+            {
+                Dispose(true);
+            }
         }
 
         protected virtual void Dispose(bool disposing)
@@ -832,6 +858,13 @@ namespace Ryujinx.Audio.Renderer.Server
                 _terminationEvent.Dispose();
                 _workBufferMemoryPin.Dispose();
                 _workBufferRegion.Dispose();
+
+                if (MemoryManager is IRefCounted rc)
+                {
+                    rc.DecrementReferenceCount();
+
+                    MemoryManager = null;
+                }
             }
         }
     }

@@ -34,15 +34,28 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
         public event EventHandler<UnmapEventArgs> MemoryUnmapped;
 
-        private GpuContext _context;
+        /// <summary>
+        /// Physical memory where the virtual memory is mapped into.
+        /// </summary>
+        internal PhysicalMemory Physical { get; }
+
+        /// <summary>
+        /// Cache of GPU counters.
+        /// </summary>
+        internal CounterCache CounterCache { get; }
 
         /// <summary>
         /// Creates a new instance of the GPU memory manager.
         /// </summary>
-        public MemoryManager(GpuContext context)
+        /// <param name="physicalMemory">Physical memory that this memory manager will map into</param>
+        internal MemoryManager(PhysicalMemory physicalMemory)
         {
-            _context = context;
+            Physical = physicalMemory;
+            CounterCache = new CounterCache();
             _pageTable = new ulong[PtLvl0Size][];
+            MemoryUnmapped += Physical.TextureCache.MemoryUnmappedHandler;
+            MemoryUnmapped += Physical.BufferCache.MemoryUnmappedHandler;
+            MemoryUnmapped += CounterCache.MemoryUnmappedHandler;
         }
 
         /// <summary>
@@ -50,10 +63,33 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// </summary>
         /// <typeparam name="T">Type of the data</typeparam>
         /// <param name="va">GPU virtual address where the data is located</param>
+        /// <param name="tracked">True if read tracking is triggered on the memory region</param>
         /// <returns>The data at the specified memory location</returns>
-        public T Read<T>(ulong va) where T : unmanaged
+        public T Read<T>(ulong va, bool tracked = false) where T : unmanaged
         {
-            return MemoryMarshal.Cast<byte, T>(GetSpan(va, Unsafe.SizeOf<T>()))[0];
+            int size = Unsafe.SizeOf<T>();
+
+            if (IsContiguous(va, size))
+            {
+                ulong address = Translate(va);
+
+                if (tracked)
+                {
+                    return Physical.ReadTracked<T>(address);
+                }
+                else
+                {
+                    return Physical.Read<T>(address);
+                }
+            }
+            else
+            {
+                Span<byte> data = new byte[size];
+
+                ReadImpl(va, data, tracked);
+
+                return MemoryMarshal.Cast<byte, T>(data)[0];
+            }
         }
 
         /// <summary>
@@ -67,7 +103,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             if (IsContiguous(va, size))
             {
-                return _context.PhysicalMemory.GetSpan(Translate(va), size, tracked);
+                return Physical.GetSpan(Translate(va), size, tracked);
             }
             else
             {
@@ -100,7 +136,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
                 size = Math.Min(data.Length, (int)PageSize - (int)(va & PageMask));
 
-                _context.PhysicalMemory.GetSpan(pa, size, tracked).CopyTo(data.Slice(0, size));
+                Physical.GetSpan(pa, size, tracked).CopyTo(data.Slice(0, size));
 
                 offset += size;
             }
@@ -111,7 +147,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
                 size = Math.Min(data.Length - offset, (int)PageSize);
 
-                _context.PhysicalMemory.GetSpan(pa, size, tracked).CopyTo(data.Slice(offset, size));
+                Physical.GetSpan(pa, size, tracked).CopyTo(data.Slice(offset, size));
             }
         }
 
@@ -125,7 +161,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             if (IsContiguous(va, size))
             {
-                return _context.PhysicalMemory.GetWritableRegion(Translate(va), size);
+                return Physical.GetWritableRegion(Translate(va), size);
             }
             else
             {
@@ -155,7 +191,17 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="data">The data to be written</param>
         public void Write(ulong va, ReadOnlySpan<byte> data)
         {
-            WriteImpl(va, data, _context.PhysicalMemory.Write);
+            WriteImpl(va, data, Physical.Write);
+        }
+
+        /// <summary>
+        /// Writes data to GPU mapped memory, destined for a tracked resource.
+        /// </summary>
+        /// <param name="va">GPU virtual address to write the data into</param>
+        /// <param name="data">The data to be written</param>
+        public void WriteTrackedResource(ulong va, ReadOnlySpan<byte> data)
+        {
+            WriteImpl(va, data, Physical.WriteTrackedResource);
         }
 
         /// <summary>
@@ -165,7 +211,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="data">The data to be written</param>
         public void WriteUntracked(ulong va, ReadOnlySpan<byte> data)
         {
-            WriteImpl(va, data, _context.PhysicalMemory.WriteUntracked);
+            WriteImpl(va, data, Physical.WriteUntracked);
         }
 
         private delegate void WriteCallback(ulong address, ReadOnlySpan<byte> data);

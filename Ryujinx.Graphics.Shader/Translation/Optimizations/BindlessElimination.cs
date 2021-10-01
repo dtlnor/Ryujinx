@@ -30,10 +30,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     texOp.Inst == Instruction.TextureSize)
                 {
                     Operand bindlessHandle = Utils.FindLastOperation(texOp.GetSource(0), block);
+                    bool rewriteSamplerType = texOp.Inst == Instruction.TextureSize;
 
                     if (bindlessHandle.Type == OperandType.ConstantBuffer)
                     {
-                        texOp.SetHandle(bindlessHandle.GetCbufOffset(), bindlessHandle.GetCbufSlot());
+                        SetHandle(config, texOp, bindlessHandle.GetCbufOffset(), bindlessHandle.GetCbufSlot(), rewriteSamplerType);
                         continue;
                     }
 
@@ -50,25 +51,54 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                     Operand src0 = Utils.FindLastOperation(handleCombineOp.GetSource(0), block);
                     Operand src1 = Utils.FindLastOperation(handleCombineOp.GetSource(1), block);
 
-                    if (src0.Type != OperandType.ConstantBuffer ||
-                        src1.Type != OperandType.ConstantBuffer || src0.GetCbufSlot() != src1.GetCbufSlot())
+                    if (src0.Type != OperandType.ConstantBuffer || src1.Type != OperandType.ConstantBuffer)
                     {
                         continue;
                     }
 
-                    texOp.SetHandle(src0.GetCbufOffset() | (src1.GetCbufOffset() << 16), src0.GetCbufSlot());
+                    SetHandle(
+                        config,
+                        texOp,
+                        src0.GetCbufOffset() | ((src1.GetCbufOffset() + 1) << 16),
+                        src0.GetCbufSlot() | ((src1.GetCbufSlot() + 1) << 16),
+                        rewriteSamplerType);
                 }
-                else if (texOp.Inst == Instruction.ImageLoad || texOp.Inst == Instruction.ImageStore)
+                else if (texOp.Inst == Instruction.ImageLoad ||
+                         texOp.Inst == Instruction.ImageStore ||
+                         texOp.Inst == Instruction.ImageAtomic)
                 {
                     Operand src0 = Utils.FindLastOperation(texOp.GetSource(0), block);
 
                     if (src0.Type == OperandType.ConstantBuffer)
                     {
-                        texOp.SetHandle(src0.GetCbufOffset(), src0.GetCbufSlot());
-                        texOp.Format = config.GetTextureFormat(texOp.Handle);
+                        int cbufOffset = src0.GetCbufOffset();
+                        int cbufSlot = src0.GetCbufSlot();
+
+                        if (texOp.Inst == Instruction.ImageAtomic)
+                        {
+                            texOp.Format = config.GetTextureFormatAtomic(cbufOffset, cbufSlot);
+                        }
+                        else
+                        {
+                            texOp.Format = config.GetTextureFormat(cbufOffset, cbufSlot);
+                        }
+
+                        SetHandle(config, texOp, cbufOffset, cbufSlot, false);
                     }
                 }
             }
+        }
+
+        private static void SetHandle(ShaderConfig config, TextureOperation texOp, int cbufOffset, int cbufSlot, bool rewriteSamplerType)
+        {
+            texOp.SetHandle(cbufOffset, cbufSlot);
+            
+            if (rewriteSamplerType)
+            {
+                texOp.Type = config.GpuAccessor.QuerySamplerType(cbufOffset, cbufSlot);
+            }
+
+            config.SetUsedTexture(texOp.Inst, texOp.Type, texOp.Format, texOp.Flags, cbufSlot, cbufOffset);
         }
     }
 }

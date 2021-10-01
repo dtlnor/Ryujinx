@@ -25,7 +25,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
             Add(Instruction.AtomicXor,                InstType.AtomicBinary,   "atomicXor");
             Add(Instruction.Absolute,                 InstType.CallUnary,      "abs");
             Add(Instruction.Add,                      InstType.OpBinaryCom,    "+",               2);
-            Add(Instruction.Ballot,                   InstType.CallUnary,      "ballotARB");
+            Add(Instruction.Ballot,                   InstType.Special);
             Add(Instruction.Barrier,                  InstType.CallNullary,    "barrier");
             Add(Instruction.BitCount,                 InstType.CallUnary,      "bitCount");
             Add(Instruction.BitfieldExtractS32,       InstType.CallTernary,    "bitfieldExtract");
@@ -72,6 +72,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
             Add(Instruction.GroupMemoryBarrier,       InstType.CallNullary,    "groupMemoryBarrier");
             Add(Instruction.ImageLoad,                InstType.Special);
             Add(Instruction.ImageStore,               InstType.Special);
+            Add(Instruction.ImageAtomic,              InstType.Special);
             Add(Instruction.IsNan,                    InstType.CallUnary,      "isnan");
             Add(Instruction.LoadAttribute,            InstType.Special);
             Add(Instruction.LoadConstant,             InstType.Special);
@@ -109,6 +110,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
             Add(Instruction.ShuffleXor,               InstType.CallQuaternary, HelperFunctionNames.ShuffleXor);
             Add(Instruction.Sine,                     InstType.CallUnary,      "sin");
             Add(Instruction.SquareRoot,               InstType.CallUnary,      "sqrt");
+            Add(Instruction.StoreAttribute,           InstType.Special);
             Add(Instruction.StoreLocal,               InstType.Special);
             Add(Instruction.StoreShared,              InstType.Special);
             Add(Instruction.StoreStorage,             InstType.Special);

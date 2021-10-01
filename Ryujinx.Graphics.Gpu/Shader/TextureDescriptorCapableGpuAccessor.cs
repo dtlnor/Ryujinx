@@ -6,9 +6,58 @@ namespace Ryujinx.Graphics.Gpu.Shader
 {
     abstract class TextureDescriptorCapableGpuAccessor : IGpuAccessor
     {
+        private readonly GpuContext _context;
+
+        public TextureDescriptorCapableGpuAccessor(GpuContext context)
+        {
+            _context = context;
+        }
+
         public abstract T MemoryRead<T>(ulong address) where T : unmanaged;
 
-        public abstract ITextureDescriptor GetTextureDescriptor(int handle);
+        public abstract ITextureDescriptor GetTextureDescriptor(int handle, int cbufSlot);
+
+        /// <summary>
+        /// Queries host about the presence of the FrontFacing built-in variable bug.
+        /// </summary>
+        /// <returns>True if the bug is present on the host device used, false otherwise</returns>
+        public bool QueryHostHasFrontFacingBug() => _context.Capabilities.HasFrontFacingBug;
+
+        /// <summary>
+        /// Queries host about the presence of the vector indexing bug.
+        /// </summary>
+        /// <returns>True if the bug is present on the host device used, false otherwise</returns>
+        public bool QueryHostHasVectorIndexingBug() => _context.Capabilities.HasVectorIndexingBug;
+
+        /// <summary>
+        /// Queries host storage buffer alignment required.
+        /// </summary>
+        /// <returns>Host storage buffer alignment in bytes</returns>
+        public int QueryHostStorageBufferOffsetAlignment() => _context.Capabilities.StorageBufferOffsetAlignment;
+
+        /// <summary>
+        /// Queries host support for readable images without a explicit format declaration on the shader.
+        /// </summary>
+        /// <returns>True if formatted image load is supported, false otherwise</returns>
+        public bool QueryHostSupportsImageLoadFormatted() => _context.Capabilities.SupportsImageLoadFormatted;
+
+        /// <summary>
+        /// Queries host GPU non-constant texture offset support.
+        /// </summary>
+        /// <returns>True if the GPU and driver supports non-constant texture offsets, false otherwise</returns>
+        public bool QueryHostSupportsNonConstantTextureOffset() => _context.Capabilities.SupportsNonConstantTextureOffset;
+
+        /// <summary>
+        /// Queries host GPU shader ballot support.
+        /// </summary>
+        /// <returns>True if the GPU and driver supports shader ballot, false otherwise</returns>
+        public bool QueryHostSupportsShaderBallot() => _context.Capabilities.SupportsShaderBallot;
+
+        /// <summary>
+        /// Queries host GPU texture shadow LOD support.
+        /// </summary>
+        /// <returns>True if the GPU and driver supports texture shadow LOD, false otherwise</returns>
+        public bool QueryHostSupportsTextureShadowLod() => _context.Capabilities.SupportsTextureShadowLod;
 
         /// <summary>
         /// Queries texture format information, for shaders using image load or store.
@@ -18,10 +67,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// If the format of the texture is a compressed, depth or unsupported format, then a default value is returned.
         /// </remarks>
         /// <param name="handle">Texture handle</param>
+        /// <param name="cbufSlot">Constant buffer slot for the texture handle</param>
         /// <returns>Color format of the non-compressed texture</returns>
-        public TextureFormat QueryTextureFormat(int handle)
+        public TextureFormat QueryTextureFormat(int handle, int cbufSlot = -1)
         {
-            var descriptor = GetTextureDescriptor(handle);
+            var descriptor = GetTextureDescriptor(handle, cbufSlot);
 
             if (!FormatTable.TryGetTextureFormat(descriptor.UnpackFormat(), descriptor.UnpackSrgb(), out FormatInfo formatInfo))
             {
@@ -75,23 +125,25 @@ namespace Ryujinx.Graphics.Gpu.Shader
         }
 
         /// <summary>
-        /// Queries texture target information.
+        /// Queries sampler type information.
         /// </summary>
         /// <param name="handle">Texture handle</param>
-        /// <returns>True if the texture is a buffer texture, false otherwise</returns>
-        public bool QueryIsTextureBuffer(int handle)
+        /// <param name="cbufSlot">Constant buffer slot for the texture handle</param>
+        /// <returns>The sampler type value for the given handle</returns>
+        public SamplerType QuerySamplerType(int handle, int cbufSlot = -1)
         {
-            return GetTextureDescriptor(handle).UnpackTextureTarget() == TextureTarget.TextureBuffer;
+            return GetTextureDescriptor(handle, cbufSlot).UnpackTextureTarget().ConvertSamplerType();
         }
 
         /// <summary>
         /// Queries texture target information.
         /// </summary>
         /// <param name="handle">Texture handle</param>
+        /// <param name="cbufSlot">Constant buffer slot for the texture handle</param>
         /// <returns>True if the texture is a rectangle texture, false otherwise</returns>
-        public bool QueryIsTextureRectangle(int handle)
+        public bool QueryIsTextureRectangle(int handle, int cbufSlot = -1)
         {
-            var descriptor = GetTextureDescriptor(handle);
+            var descriptor = GetTextureDescriptor(handle, cbufSlot);
 
             TextureTarget target = descriptor.UnpackTextureTarget();
 

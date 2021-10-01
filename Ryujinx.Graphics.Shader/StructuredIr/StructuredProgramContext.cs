@@ -277,25 +277,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
         public AstOperand GetOperandDef(Operand operand)
         {
-            if (TryGetUserAttributeIndex(operand, out int attrIndex))
-            {
-                Info.OAttributes.Add(attrIndex);
-            }
-
             return GetOperand(operand);
         }
 
         public AstOperand GetOperandUse(Operand operand)
         {
-            if (TryGetUserAttributeIndex(operand, out int attrIndex))
-            {
-                Info.IAttributes.Add(attrIndex);
-            }
-            else if (operand.Type == OperandType.ConstantBuffer)
-            {
-                Info.CBuffers.Add(operand.GetCbufSlot());
-            }
-
             return GetOperand(operand);
         }
 
@@ -321,31 +307,6 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             }
 
             return astOperand;
-        }
-
-        private static bool TryGetUserAttributeIndex(Operand operand, out int attrIndex)
-        {
-            if (operand.Type == OperandType.Attribute)
-            {
-                if (operand.Value >= AttributeConsts.UserAttributeBase &&
-                    operand.Value <  AttributeConsts.UserAttributeEnd)
-                {
-                    attrIndex = (operand.Value - AttributeConsts.UserAttributeBase) >> 4;
-
-                    return true;
-                }
-                else if (operand.Value >= AttributeConsts.FragmentOutputColorBase &&
-                         operand.Value <  AttributeConsts.FragmentOutputColorEnd)
-                {
-                    attrIndex = (operand.Value - AttributeConsts.FragmentOutputColorBase) >> 4;
-
-                    return true;
-                }
-            }
-
-            attrIndex = 0;
-
-            return false;
         }
     }
 }

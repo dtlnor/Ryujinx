@@ -151,23 +151,35 @@ namespace Ryujinx.Audio.Renderer.Server
 
         private void GenerateBiquadFilterForVoice(ref VoiceState voiceState, Memory<VoiceUpdateState> state, int baseIndex, int bufferOffset, int nodeId)
         {
-            for (int i = 0; i < voiceState.BiquadFilters.Length; i++)
+            bool supportsOptimizedPath = _rendererContext.BehaviourContext.IsBiquadFilterGroupedOptimizationSupported();
+
+            if (supportsOptimizedPath && voiceState.BiquadFilters[0].Enable && voiceState.BiquadFilters[1].Enable)
             {
-                ref BiquadFilterParameter filter = ref voiceState.BiquadFilters[i];
+                Memory<byte> biquadStateRawMemory = SpanMemoryManager<byte>.Cast(state).Slice(VoiceUpdateState.BiquadStateOffset, VoiceUpdateState.BiquadStateSize * Constants.VoiceBiquadFilterCount);
+                Memory<BiquadFilterState> stateMemory = SpanMemoryManager<BiquadFilterState>.Cast(biquadStateRawMemory);
 
-                if (filter.Enable)
+                _commandBuffer.GenerateGroupedBiquadFilter(baseIndex, voiceState.BiquadFilters.ToSpan(), stateMemory, bufferOffset, bufferOffset, voiceState.BiquadFilterNeedInitialization, nodeId);
+            }
+            else
+            {
+                for (int i = 0; i < voiceState.BiquadFilters.Length; i++)
                 {
-                    Memory<byte> biquadStateRawMemory = SpanMemoryManager<byte>.Cast(state).Slice(VoiceUpdateState.BiquadStateOffset, VoiceUpdateState.BiquadStateSize * Constants.VoiceBiquadFilterCount);
+                    ref BiquadFilterParameter filter = ref voiceState.BiquadFilters[i];
 
-                    Memory<BiquadFilterState> stateMemory = SpanMemoryManager<BiquadFilterState>.Cast(biquadStateRawMemory);
+                    if (filter.Enable)
+                    {
+                        Memory<byte> biquadStateRawMemory = SpanMemoryManager<byte>.Cast(state).Slice(VoiceUpdateState.BiquadStateOffset, VoiceUpdateState.BiquadStateSize * Constants.VoiceBiquadFilterCount);
 
-                    _commandBuffer.GenerateBiquadFilter(baseIndex,
-                                                        ref filter,
-                                                        stateMemory.Slice(i, 1),
-                                                        bufferOffset,
-                                                        bufferOffset,
-                                                        !voiceState.BiquadFilterNeedInitialization[i],
-                                                        nodeId);
+                        Memory<BiquadFilterState> stateMemory = SpanMemoryManager<BiquadFilterState>.Cast(biquadStateRawMemory);
+
+                        _commandBuffer.GenerateBiquadFilter(baseIndex,
+                                                            ref filter,
+                                                            stateMemory.Slice(i, 1),
+                                                            bufferOffset,
+                                                            bufferOffset,
+                                                            !voiceState.BiquadFilterNeedInitialization[i],
+                                                            nodeId);
+                    }
                 }
             }
         }
@@ -443,7 +455,7 @@ namespace Ryujinx.Audio.Renderer.Server
 
                     uint updateCount;
 
-                    if ((channelIndex - 1) != 0)
+                    if (channelIndex != 1)
                     {
                         updateCount = 0;
                     }
@@ -538,7 +550,71 @@ namespace Ryujinx.Audio.Renderer.Server
             }
         }
 
-        private void GenerateEffect(ref MixState mix, BaseEffect effect)
+        private void GenerateLimiterEffect(uint bufferOffset, LimiterEffect effect, int nodeId, int effectId)
+        {
+            Debug.Assert(effect.Type == EffectType.Limiter);
+
+            ulong workBuffer = effect.GetWorkBuffer(-1);
+
+            if (_rendererContext.BehaviourContext.IsEffectInfoVersion2Supported())
+            {
+                Memory<EffectResultState> dspResultState = _effectContext.GetDspStateMemory(effectId);
+
+                _commandBuffer.GenerateLimiterEffectVersion2(bufferOffset, effect.Parameter, effect.State, dspResultState, effect.IsEnabled, workBuffer, nodeId);
+            }
+            else
+            {
+                _commandBuffer.GenerateLimiterEffectVersion1(bufferOffset, effect.Parameter, effect.State, effect.IsEnabled, workBuffer, nodeId);
+            }
+        }
+
+        private void GenerateCaptureEffect(uint bufferOffset, CaptureBufferEffect effect, int nodeId)
+        {
+            Debug.Assert(effect.Type == EffectType.CaptureBuffer);
+
+            if (effect.IsEnabled)
+            {
+                effect.GetWorkBuffer(0);
+            }
+
+            if (effect.State.SendBufferInfoBase != 0)
+            {
+                int i = 0;
+                uint writeOffset = 0;
+
+                for (uint channelIndex = effect.Parameter.ChannelCount; channelIndex != 0; channelIndex--)
+                {
+                    uint newUpdateCount = writeOffset + _commandBuffer.CommandList.SampleCount;
+
+                    uint updateCount;
+
+                    if (channelIndex != 1)
+                    {
+                        updateCount = 0;
+                    }
+                    else
+                    {
+                        updateCount = newUpdateCount;
+                    }
+
+                    _commandBuffer.GenerateCaptureEffect(bufferOffset,
+                                                         effect.Parameter.Input[i],
+                                                         effect.State.SendBufferInfo,
+                                                         effect.IsEnabled,
+                                                         effect.Parameter.BufferStorageSize,
+                                                         effect.State.SendBufferInfoBase,
+                                                         updateCount,
+                                                         writeOffset,
+                                                         nodeId);
+
+                    writeOffset = newUpdateCount;
+
+                    i++;
+                }
+            }
+        }
+
+        private void GenerateEffect(ref MixState mix, int effectId, BaseEffect effect)
         {
             int nodeId = mix.NodeId;
 
@@ -576,6 +652,12 @@ namespace Ryujinx.Audio.Renderer.Server
                 case EffectType.BiquadFilter:
                     GenerateBiquadFilterEffect(mix.BufferOffset, (BiquadFilterEffect)effect, nodeId);
                     break;
+                case EffectType.Limiter:
+                    GenerateLimiterEffect(mix.BufferOffset, (LimiterEffect)effect, nodeId, effectId);
+                    break;
+                case EffectType.CaptureBuffer:
+                    GenerateCaptureEffect(mix.BufferOffset, (CaptureBufferEffect)effect, nodeId);
+                    break;
                 default:
                     throw new NotImplementedException($"Unsupported effect type {effect.Type}");
             }
@@ -611,7 +693,7 @@ namespace Ryujinx.Audio.Renderer.Server
 
                 if (!effect.ShouldSkip())
                 {
-                    GenerateEffect(ref mix, effect);
+                    GenerateEffect(ref mix, effectOrder, effect);
                 }
             }
         }

@@ -2,6 +2,7 @@ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.StructuredIr;
 using System;
 
+using static Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions.InstGenBallot;
 using static Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions.InstGenCall;
 using static Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions.InstGenHelper;
 using static Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions.InstGenMemory;
@@ -20,7 +21,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
             }
             else if (node is AstOperand operand)
             {
-                return context.OperandManager.GetExpression(operand, context.Config, context.CbIndexable);
+                return context.OperandManager.GetExpression(operand, context.Config);
             }
 
             throw new ArgumentException($"Invalid node type \"{node?.GetType().Name ?? "null"}\".");
@@ -62,7 +63,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
                         switch (memRegion)
                         {
                             case Instruction.MrShared: args += LoadShared(context, operation); break;
-                            case Instruction.MrStorage: args += LoadStorage(context, operation, forAtomic: true); break;
+                            case Instruction.MrStorage: args += LoadStorage(context, operation); break;
 
                             default: throw new InvalidOperationException($"Invalid memory region \"{memRegion}\".");
                         }
@@ -75,14 +76,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
                     }
                 }
 
-                if (inst == Instruction.Ballot)
-                {
-                    return $"unpackUint2x32({info.OpName}({args})).x";
-                }
-                else
-                {
-                    return info.OpName + "(" + args + ")";
-                }
+                return info.OpName + '(' + args + ')';
             }
             else if ((info.Type & InstType.Op) != 0)
             {
@@ -128,13 +122,15 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
             {
                 switch (inst)
                 {
+                    case Instruction.Ballot:
+                        return Ballot(context, operation);
+
                     case Instruction.Call:
                         return Call(context, operation);
 
                     case Instruction.ImageLoad:
-                        return ImageLoadOrStore(context, operation);
-
                     case Instruction.ImageStore:
+                    case Instruction.ImageAtomic:
                         return ImageLoadOrStore(context, operation);
 
                     case Instruction.LoadAttribute:
@@ -160,6 +156,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
 
                     case Instruction.PackHalf2x16:
                         return PackHalf2x16(context, operation);
+
+                    case Instruction.StoreAttribute:
+                        return StoreAttribute(context, operation);
 
                     case Instruction.StoreLocal:
                         return StoreLocal(context, operation);

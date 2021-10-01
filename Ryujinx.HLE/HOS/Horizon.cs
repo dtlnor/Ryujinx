@@ -1,6 +1,6 @@
-using LibHac;
-using LibHac.Bcat;
+using LibHac.Common.Keys;
 using LibHac.Fs;
+using LibHac.Fs.Shim;
 using LibHac.FsSystem;
 using Ryujinx.Audio;
 using Ryujinx.Audio.Input;
@@ -8,10 +8,7 @@ using Ryujinx.Audio.Integration;
 using Ryujinx.Audio.Output;
 using Ryujinx.Audio.Renderer.Device;
 using Ryujinx.Audio.Renderer.Server;
-using Ryujinx.Common;
-using Ryujinx.Configuration;
 using Ryujinx.HLE.FileSystem.Content;
-using Ryujinx.HLE.HOS.Font;
 using Ryujinx.HLE.HOS.Kernel;
 using Ryujinx.HLE.HOS.Kernel.Memory;
 using Ryujinx.HLE.HOS.Kernel.Process;
@@ -20,14 +17,14 @@ using Ryujinx.HLE.HOS.Services;
 using Ryujinx.HLE.HOS.Services.Account.Acc;
 using Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.SystemAppletProxy;
 using Ryujinx.HLE.HOS.Services.Apm;
-using Ryujinx.HLE.HOS.Services.Arp;
 using Ryujinx.HLE.HOS.Services.Audio.AudioRenderer;
 using Ryujinx.HLE.HOS.Services.Caps;
 using Ryujinx.HLE.HOS.Services.Mii;
-using Ryujinx.HLE.HOS.Services.Nfc.Nfp.UserManager;
+using Ryujinx.HLE.HOS.Services.Nfc.Nfp.NfpManager;
 using Ryujinx.HLE.HOS.Services.Nv;
 using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl;
 using Ryujinx.HLE.HOS.Services.Pcv.Bpc;
+using Ryujinx.HLE.HOS.Services.Sdb.Pl;
 using Ryujinx.HLE.HOS.Services.Settings;
 using Ryujinx.HLE.HOS.Services.Sm;
 using Ryujinx.HLE.HOS.Services.SurfaceFlinger;
@@ -40,6 +37,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using TimeSpanType = Ryujinx.HLE.HOS.Services.Time.Clock.TimeSpanType;
 
 namespace Ryujinx.HLE.HOS
 {
@@ -47,10 +45,11 @@ namespace Ryujinx.HLE.HOS
 
     public class Horizon : IDisposable
     {
-        internal const int HidSize  = 0x40000;
-        internal const int FontSize = 0x1100000;
-        internal const int IirsSize = 0x8000;
-        internal const int TimeSize = 0x1000;
+        internal const int HidSize                 = 0x40000;
+        internal const int FontSize                = 0x1100000;
+        internal const int IirsSize                = 0x8000;
+        internal const int TimeSize                = 0x1000;
+        internal const int AppletCaptureBufferSize = 0x384000;
 
         internal KernelContext KernelContext { get; }
 
@@ -71,6 +70,7 @@ namespace Ryujinx.HLE.HOS
 
         internal List<NfpDevice> NfpDevices { get; private set; }
 
+        internal ServerBase SmServer { get; private set; }
         internal ServerBase BsdServer { get; private set; }
         internal ServerBase AudRenServer { get; private set; }
         internal ServerBase AudOutServer { get; private set; }
@@ -84,17 +84,19 @@ namespace Ryujinx.HLE.HOS
         internal KSharedMemory HidSharedMem  { get; private set; }
         internal KSharedMemory FontSharedMem { get; private set; }
         internal KSharedMemory IirsSharedMem { get; private set; }
-        internal SharedFontManager Font { get; private set; }
 
-        internal AccountManager AccountManager { get; private set; }
-        internal ContentManager ContentManager { get; private set; }
-        internal CaptureManager CaptureManager { get; private set; }
+        internal KTransferMemory AppletCaptureBufferTransfer { get; private set; }
+
+        internal SharedFontManager SharedFontManager { get; private set; }
+        internal AccountManager    AccountManager    { get; private set; }
+        internal ContentManager    ContentManager    { get; private set; }
+        internal CaptureManager    CaptureManager    { get; private set; }
 
         internal KEvent VsyncEvent { get; private set; }
 
         internal KEvent DisplayResolutionChangeEvent { get; private set; }
 
-        public Keyset KeySet => Device.FileSystem.KeySet;
+        public KeySet KeySet => Device.FileSystem.KeySet;
 
         private bool _isDisposed;
 
@@ -104,20 +106,21 @@ namespace Ryujinx.HLE.HOS
 
         public int GlobalAccessLogMode { get; set; }
 
-        internal ulong HidBaseAddress { get; private set; }
+        internal SharedMemoryStorage HidStorage { get; private set; }
 
         internal NvHostSyncpt HostSyncpoint { get; private set; }
 
-        internal LibHac.Horizon LibHacHorizonServer { get; private set; }
-        internal HorizonClient LibHacHorizonClient { get; private set; }
+        internal LibHacHorizonManager LibHacHorizonManager { get; private set; }
 
-        public Horizon(Switch device, ContentManager contentManager, AccountManager accountManager, MemoryConfiguration memoryConfiguration)
+        public bool IsPaused { get; private set; }
+
+        public Horizon(Switch device)
         {
             KernelContext = new KernelContext(
                 device,
                 device.Memory,
-                memoryConfiguration.ToKernelMemorySize(),
-                memoryConfiguration.ToKernelMemoryArrange());
+                device.Configuration.MemoryConfiguration.ToKernelMemorySize(),
+                device.Configuration.MemoryConfiguration.ToKernelMemoryArrange());
 
             Device = device;
 
@@ -129,46 +132,58 @@ namespace Ryujinx.HLE.HOS
 
             // Note: This is not really correct, but with HLE of services, the only memory
             // region used that is used is Application, so we can use the other ones for anything.
-            KMemoryRegionManager region = KernelContext.MemoryRegions[(int)MemoryRegion.NvServices];
+            KMemoryRegionManager region = KernelContext.MemoryManager.MemoryRegions[(int)MemoryRegion.NvServices];
 
-            ulong hidPa  = region.Address;
-            ulong fontPa = region.Address + HidSize;
-            ulong iirsPa = region.Address + HidSize + FontSize;
-            ulong timePa = region.Address + HidSize + FontSize + IirsSize;
+            ulong hidPa                 = region.Address;
+            ulong fontPa                = region.Address + HidSize;
+            ulong iirsPa                = region.Address + HidSize + FontSize;
+            ulong timePa                = region.Address + HidSize + FontSize + IirsSize;
+            ulong appletCaptureBufferPa = region.Address + HidSize + FontSize + IirsSize + TimeSize;
 
-            HidBaseAddress = hidPa - DramMemoryMap.DramBase;
+            KPageList hidPageList                 = new KPageList();
+            KPageList fontPageList                = new KPageList();
+            KPageList iirsPageList                = new KPageList();
+            KPageList timePageList                = new KPageList();
+            KPageList appletCaptureBufferPageList = new KPageList();
 
-            KPageList hidPageList  = new KPageList();
-            KPageList fontPageList = new KPageList();
-            KPageList iirsPageList = new KPageList();
-            KPageList timePageList = new KPageList();
+            hidPageList.AddRange(hidPa, HidSize / KPageTableBase.PageSize);
+            fontPageList.AddRange(fontPa, FontSize / KPageTableBase.PageSize);
+            iirsPageList.AddRange(iirsPa, IirsSize / KPageTableBase.PageSize);
+            timePageList.AddRange(timePa, TimeSize / KPageTableBase.PageSize);
+            appletCaptureBufferPageList.AddRange(appletCaptureBufferPa, AppletCaptureBufferSize / KPageTableBase.PageSize);
 
-            hidPageList .AddRange(hidPa,  HidSize  / KMemoryManager.PageSize);
-            fontPageList.AddRange(fontPa, FontSize / KMemoryManager.PageSize);
-            iirsPageList.AddRange(iirsPa, IirsSize / KMemoryManager.PageSize);
-            timePageList.AddRange(timePa, TimeSize / KMemoryManager.PageSize);
+            var hidStorage = new SharedMemoryStorage(KernelContext, hidPageList);
+            var fontStorage = new SharedMemoryStorage(KernelContext, fontPageList);
+            var iirsStorage = new SharedMemoryStorage(KernelContext, iirsPageList);
+            var timeStorage = new SharedMemoryStorage(KernelContext, timePageList);
+            var appletCaptureBufferStorage = new SharedMemoryStorage(KernelContext, appletCaptureBufferPageList);
 
-            HidSharedMem  = new KSharedMemory(KernelContext, hidPageList,  0, 0, KMemoryPermission.Read);
-            FontSharedMem = new KSharedMemory(KernelContext, fontPageList, 0, 0, KMemoryPermission.Read);
-            IirsSharedMem = new KSharedMemory(KernelContext, iirsPageList, 0, 0, KMemoryPermission.Read);
+            HidStorage = hidStorage;
 
-            KSharedMemory timeSharedMemory = new KSharedMemory(KernelContext, timePageList, 0, 0, KMemoryPermission.Read);
+            HidSharedMem  = new KSharedMemory(KernelContext, hidStorage,  0, 0, KMemoryPermission.Read);
+            FontSharedMem = new KSharedMemory(KernelContext, fontStorage, 0, 0, KMemoryPermission.Read);
+            IirsSharedMem = new KSharedMemory(KernelContext, iirsStorage, 0, 0, KMemoryPermission.Read);
 
-            TimeServiceManager.Instance.Initialize(device, this, timeSharedMemory, timePa - DramMemoryMap.DramBase, TimeSize);
+            KSharedMemory timeSharedMemory = new KSharedMemory(KernelContext, timeStorage, 0, 0, KMemoryPermission.Read);
+
+            TimeServiceManager.Instance.Initialize(device, this, timeSharedMemory, timeStorage, TimeSize);
+
+            AppletCaptureBufferTransfer = new KTransferMemory(KernelContext, appletCaptureBufferStorage);
 
             AppletState = new AppletStateMgr(this);
 
             AppletState.SetFocus(true);
 
-            Font = new SharedFontManager(device, fontPa - DramMemoryMap.DramBase);
-
             VsyncEvent = new KEvent(KernelContext);
 
             DisplayResolutionChangeEvent = new KEvent(KernelContext);
 
-            AccountManager = accountManager;
-            ContentManager = contentManager;
-            CaptureManager = new CaptureManager(device);
+            SharedFontManager = new SharedFontManager(device, fontStorage);
+            AccountManager    = device.Configuration.AccountManager;
+            ContentManager    = device.Configuration.ContentManager;
+            CaptureManager    = new CaptureManager(device);
+
+            LibHacHorizonManager = device.Configuration.LibHacHorizonManager;
 
             // TODO: use set:sys (and get external clock source id from settings)
             // TODO: use "time!standard_steady_clock_rtc_update_interval_minutes" and implement a worker thread to be accurate.
@@ -179,7 +194,7 @@ namespace Ryujinx.HLE.HOS
             TimeSpanType systemTime = TimeSpanType.FromSeconds((long)rtcValue);
 
             // Configure and setup internal offset
-            TimeSpanType internalOffset = TimeSpanType.FromSeconds(ConfigurationState.Instance.System.SystemTimeOffset);
+            TimeSpanType internalOffset = TimeSpanType.FromSeconds(device.Configuration.SystemTimeOffset);
 
             TimeSpanType systemTimeOffset = new TimeSpanType(systemTime.NanoSeconds + internalOffset.NanoSeconds);
 
@@ -209,19 +224,16 @@ namespace Ryujinx.HLE.HOS
 
             TimeServiceManager.Instance.SetupStandardUserSystemClock(null, false, SteadyClockTimePoint.GetRandom());
 
-            // FIXME: TimeZone shoud be init here but it's actually done in ContentManager
+            // FIXME: TimeZone should be init here but it's actually done in ContentManager
 
             TimeServiceManager.Instance.SetupEphemeralNetworkSystemClock();
 
-            DatabaseImpl.Instance.InitializeDatabase(device);
+            DatabaseImpl.Instance.InitializeDatabase(LibHacHorizonManager.SdbClient);
 
             HostSyncpoint = new NvHostSyncpt(device);
 
             SurfaceFlinger = new SurfaceFlinger(device);
 
-            ConfigurationState.Instance.System.EnableDockedMode.Event += OnDockedModeChange;
-
-            InitLibHacHorizon();
             InitializeAudioRenderer();
         }
 
@@ -273,13 +285,11 @@ namespace Ryujinx.HLE.HOS
 
         public void InitializeServices()
         {
-            IUserInterface sm = new IUserInterface(KernelContext);
-            sm.TrySetServer(new ServerBase(KernelContext, "SmServer", () => new IUserInterface(KernelContext)));
+            SmServer = new ServerBase(KernelContext, "SmServer", () => new IUserInterface(KernelContext));
 
             // Wait until SM server thread is done with initialization,
             // only then doing connections to SM is safe.
-            sm.Server.InitDone.WaitOne();
-            sm.Server.InitDone.Dispose();
+            SmServer.InitDone.WaitOne();
 
             BsdServer = new ServerBase(KernelContext, "BsdServer");
             AudRenServer = new ServerBase(KernelContext, "AudioRendererServer");
@@ -299,35 +309,20 @@ namespace Ryujinx.HLE.HOS
             ProgramLoader.LoadKip(KernelContext, new KipExecutable(kipFile));
         }
 
-        private void InitLibHacHorizon()
+        public void ChangeDockedModeState(bool newState)
         {
-            LibHac.Horizon horizon = new LibHac.Horizon(null, Device.FileSystem.FsServer);
-
-            horizon.CreateHorizonClient(out HorizonClient ryujinxClient).ThrowIfFailure();
-            horizon.CreateHorizonClient(out HorizonClient bcatClient).ThrowIfFailure();
-
-            ryujinxClient.Sm.RegisterService(new LibHacIReader(this), "arp:r").ThrowIfFailure();
-            new BcatServer(bcatClient);
-
-            LibHacHorizonServer = horizon;
-            LibHacHorizonClient = ryujinxClient;
-        }
-
-        private void OnDockedModeChange(object sender, ReactiveEventArgs<bool> e)
-        {
-            if (e.NewValue != State.DockedMode)
+            if (newState != State.DockedMode)
             {
-                State.DockedMode = e.NewValue;
+                State.DockedMode = newState;
                 PerformanceState.PerformanceMode = State.DockedMode ? PerformanceMode.Boost : PerformanceMode.Default;
 
-                AppletState.Messages.Enqueue(MessageInfo.OperationModeChanged);
-                AppletState.Messages.Enqueue(MessageInfo.PerformanceModeChanged);
+                AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
+                AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
                 AppletState.MessageEvent.ReadableEvent.Signal();
 
                 SignalDisplayResolutionChange();
 
-                // Reconfigure controllers
-                Device.Hid.RefreshInputConfig(ConfigurationState.Instance.Hid.InputConfig.Value);
+                Device.Configuration.RefreshInputConfig?.Invoke();
             }
         }
 
@@ -338,7 +333,7 @@ namespace Ryujinx.HLE.HOS
 
         public void SimulateWakeUpMessage()
         {
-            AppletState.Messages.Enqueue(MessageInfo.Resume);
+            AppletState.Messages.Enqueue(AppletMessage.Resume);
             AppletState.MessageEvent.ReadableEvent.Signal();
         }
 
@@ -346,8 +341,8 @@ namespace Ryujinx.HLE.HOS
         {
             if (NfpDevices[nfpDeviceId].State == NfpDeviceState.SearchingForTag)
             {
-                NfpDevices[nfpDeviceId].State         = NfpDeviceState.TagFound;
-                NfpDevices[nfpDeviceId].AmiiboId      = amiiboId;
+                NfpDevices[nfpDeviceId].State = NfpDeviceState.TagFound;
+                NfpDevices[nfpDeviceId].AmiiboId = amiiboId;
                 NfpDevices[nfpDeviceId].UseRandomUuid = useRandomUuid;
             }
         }
@@ -388,9 +383,17 @@ namespace Ryujinx.HLE.HOS
         {
             if (!_isDisposed && disposing)
             {
-                ConfigurationState.Instance.System.EnableDockedMode.Event -= OnDockedModeChange;
-
                 _isDisposed = true;
+
+                // "Soft" stops AudioRenderer and AudioManager to avoid some sound between resume and stop.
+                if (IsPaused)
+                {
+                    AudioManager.StopUpdates();
+
+                    TogglePauseEmulation(false);
+
+                    AudioRendererManager.StopSendingCommands();
+                }
 
                 KProcess terminationProcess = new KProcess(KernelContext);
                 KThread terminationThread = new KThread(KernelContext);
@@ -404,17 +407,21 @@ namespace Ryujinx.HLE.HOS
                         foreach (KProcess process in KernelContext.Processes.Values.Where(x => x.Flags.HasFlag(ProcessCreationFlags.IsApplication)))
                         {
                             process.Terminate();
+                            process.DecrementReferenceCount();
                         }
 
                         // The application existed, now surface flinger can exit too.
                         SurfaceFlinger.Dispose();
 
                         // Terminate HLE services (must be done after the application is already terminated,
-                        // otherwise the application will receive errors due to service termination.
+                        // otherwise the application will receive errors due to service termination).
                         foreach (KProcess process in KernelContext.Processes.Values.Where(x => !x.Flags.HasFlag(ProcessCreationFlags.IsApplication)))
                         {
                             process.Terminate();
+                            process.DecrementReferenceCount();
                         }
+
+                        KernelContext.Processes.Clear();
                     }
 
                     // Exit ourself now!
@@ -442,8 +449,37 @@ namespace Ryujinx.HLE.HOS
 
                 AudioRendererManager.Dispose();
 
+                LibHacHorizonManager.AmClient.Fs.UnregisterProgram(LibHacHorizonManager.ApplicationClient.Os.GetCurrentProcessId().Value);
+                
                 KernelContext.Dispose();
             }
+        }
+
+        public void TogglePauseEmulation(bool pause)
+        {
+            lock (KernelContext.Processes)
+            {
+                foreach (KProcess process in KernelContext.Processes.Values)
+                {
+                    if (process.Flags.HasFlag(ProcessCreationFlags.IsApplication))
+                    {
+                        // Only game process should be paused.
+                        process.SetActivity(pause);
+                    }
+                }
+
+                if (pause && !IsPaused)
+                {
+                    Device.AudioDeviceDriver.GetPauseEvent().Reset();
+                    ARMeilleure.State.ExecutionContext.SuspendCounter();
+                }
+                else if (!pause && IsPaused)
+                {
+                    Device.AudioDeviceDriver.GetPauseEvent().Set();
+                    ARMeilleure.State.ExecutionContext.ResumeCounter();
+                }
+            }
+            IsPaused = pause;
         }
     }
 }

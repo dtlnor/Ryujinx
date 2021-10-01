@@ -1,6 +1,6 @@
-using Ryujinx.HLE.HOS.Font;
 using Ryujinx.HLE.HOS.Ipc;
 using Ryujinx.HLE.HOS.Kernel.Common;
+using Ryujinx.HLE.HOS.Services.Sdb.Pl.Types;
 using System;
 
 namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
@@ -43,7 +43,7 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
         {
             SharedFontType fontType = (SharedFontType)context.RequestData.ReadInt32();
 
-            context.ResponseData.Write(context.Device.System.Font.GetFontSize(fontType));
+            context.ResponseData.Write(context.Device.System.SharedFontManager.GetFontSize(fontType));
 
             return ResultCode.Success;
         }
@@ -54,7 +54,7 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
         {
             SharedFontType fontType = (SharedFontType)context.RequestData.ReadInt32();
 
-            context.ResponseData.Write(context.Device.System.Font.GetSharedMemoryAddressOffset(fontType));
+            context.ResponseData.Write(context.Device.System.SharedFontManager.GetSharedMemoryAddressOffset(fontType));
 
             return ResultCode.Success;
         }
@@ -63,7 +63,7 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
         // GetSharedMemoryNativeHandle() -> handle<copy>
         public ResultCode GetSharedMemoryNativeHandle(ServiceCtx context)
         {
-            context.Device.System.Font.EnsureInitialized(context.Device.System.ContentManager);
+            context.Device.System.SharedFontManager.EnsureInitialized(context.Device.System.ContentManager);
 
             if (_fontSharedMemHandle == 0)
             {
@@ -103,6 +103,15 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
             return ResultCode.Success;
         }
 
+        [CommandHipc(6)] // 4.0.0+
+        // GetSharedFontInOrderOfPriorityForSystem(bytes<8, 1>) -> (u8, u32, buffer<unknown, 6>, buffer<unknown, 6>, buffer<unknown, 6>)
+        public ResultCode GetSharedFontInOrderOfPriorityForSystem(ServiceCtx context)
+        {
+            // TODO: Check the differencies with GetSharedFontInOrderOfPriority. 
+
+            return GetSharedFontInOrderOfPriority(context);
+        }
+
         private bool AddFontToOrderOfPriorityList(ServiceCtx context, SharedFontType fontType, uint offset)
         {
             ulong typesPosition = context.Request.ReceiveBuff[0].Position;
@@ -122,8 +131,8 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
             }
 
             context.Memory.Write(typesPosition + offset, (int)fontType);
-            context.Memory.Write(offsetsPosition + offset, context.Device.System.Font.GetSharedMemoryAddressOffset(fontType));
-            context.Memory.Write(fontSizeBufferPosition + offset, context.Device.System.Font.GetFontSize(fontType));
+            context.Memory.Write(offsetsPosition + offset, context.Device.System.SharedFontManager.GetSharedMemoryAddressOffset(fontType));
+            context.Memory.Write(fontSizeBufferPosition + offset, context.Device.System.SharedFontManager.GetFontSize(fontType));
 
             return true;
         }

@@ -7,6 +7,11 @@
             // No default log output.
         }
 
+        uint ConstantBuffer1Read(int offset)
+        {
+            return 0;
+        }
+
         T MemoryRead<T>(ulong address) where T : unmanaged;
 
         bool MemoryMapped(ulong address)
@@ -41,15 +46,50 @@
 
         uint QueryConstantBufferUse()
         {
-            return 0xffff;
+            return 0;
         }
 
-        bool QueryIsTextureBuffer(int handle)
+        bool QueryHostHasFrontFacingBug()
         {
             return false;
         }
 
-        bool QueryIsTextureRectangle(int handle)
+        bool QueryHostHasVectorIndexingBug()
+        {
+            return false;
+        }
+
+        int QueryHostStorageBufferOffsetAlignment()
+        {
+            return 16;
+        }
+
+        bool QueryHostSupportsImageLoadFormatted()
+        {
+            return true;
+        }
+
+        bool QueryHostSupportsNonConstantTextureOffset()
+        {
+            return true;
+        }
+
+        bool QueryHostSupportsShaderBallot()
+        {
+            return true;
+        }
+
+        bool QueryHostSupportsTextureShadowLod()
+        {
+            return true;
+        }
+
+        SamplerType QuerySamplerType(int handle, int cbufSlot = -1)
+        {
+            return SamplerType.Texture2D;
+        }
+
+        bool QueryIsTextureRectangle(int handle, int cbufSlot = -1)
         {
             return false;
         }
@@ -59,22 +99,7 @@
             return InputTopology.Points;
         }
 
-        int QueryStorageBufferOffsetAlignment()
-        {
-            return 16;
-        }
-
-        bool QuerySupportsImageLoadFormatted()
-        {
-            return true;
-        }
-
-        bool QuerySupportsNonConstantTextureOffset()
-        {
-            return true;
-        }
-
-        TextureFormat QueryTextureFormat(int handle)
+        TextureFormat QueryTextureFormat(int handle, int cbufSlot = -1)
         {
             return TextureFormat.R8G8B8A8Unorm;
         }

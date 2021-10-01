@@ -7,7 +7,7 @@ using System.Diagnostics;
 using System.Reflection;
 
 using static ARMeilleure.Instructions.InstEmitHelper;
-using static ARMeilleure.IntermediateRepresentation.OperandHelper;
+using static ARMeilleure.IntermediateRepresentation.Operand.Factory;
 
 namespace ARMeilleure.Instructions
 {
@@ -188,6 +188,15 @@ namespace ARMeilleure.Instructions
         public static Operand X86GetAllElements(ArmEmitterContext context, double value)
         {
             return X86GetAllElements(context, BitConverter.DoubleToInt64Bits(value));
+        }
+
+        public static Operand X86GetAllElements(ArmEmitterContext context, short value)
+        {
+            ulong value1 = (ushort)value;
+            ulong value2 = value1 << 16 | value1;
+            ulong value4 = value2 << 32 | value2;
+
+            return X86GetAllElements(context, (long)value4);
         }
 
         public static Operand X86GetAllElements(ArmEmitterContext context, int value)
@@ -1270,9 +1279,11 @@ namespace ARMeilleure.Instructions
             context.MarkLabel(lblTrue);
         }
 
-        public static void EmitSseOrAvxExitFtzAndDazModesOpF(ArmEmitterContext context, Operand isTrue = null)
+        public static void EmitSseOrAvxExitFtzAndDazModesOpF(ArmEmitterContext context, Operand isTrue = default)
         {
-            isTrue ??= context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetFpcrFz)));
+            isTrue = isTrue == default 
+                ? context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.GetFpcrFz)))
+                : isTrue;
 
             Operand lblTrue = Label();
             context.BranchIfFalse(lblTrue, isTrue);
@@ -1446,7 +1457,7 @@ namespace ARMeilleure.Instructions
             }
             else
             {
-                Operand me = null;
+                Operand me = default;
 
                 if (byElem)
                 {
@@ -1616,7 +1627,7 @@ namespace ARMeilleure.Instructions
         {
             ThrowIfInvalid(index, size);
 
-            Operand res = null;
+            Operand res = default;
 
             switch (size)
             {

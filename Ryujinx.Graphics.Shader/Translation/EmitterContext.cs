@@ -15,6 +15,8 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public bool IsNonMain { get; }
 
+        public int OperationsCount => _operations.Count;
+
         private readonly IReadOnlyDictionary<ulong, int> _funcs;
         private readonly List<Operation> _operations;
         private readonly Dictionary<ulong, Operand> _labels;
@@ -53,6 +55,36 @@ namespace Ryujinx.Graphics.Shader.Translation
             _operations.Add(operation);
         }
 
+        public TextureOperation CreateTextureOperation(
+            Instruction inst,
+            SamplerType type,
+            TextureFlags flags,
+            int handle,
+            int compIndex,
+            Operand dest,
+            params Operand[] sources)
+        {
+            return CreateTextureOperation(inst, type, TextureFormat.Unknown, flags, handle, compIndex, dest, sources);
+        }
+
+        public TextureOperation CreateTextureOperation(
+            Instruction inst,
+            SamplerType type,
+            TextureFormat format,
+            TextureFlags flags,
+            int handle,
+            int compIndex,
+            Operand dest,
+            params Operand[] sources)
+        {
+            if (!flags.HasFlag(TextureFlags.Bindless))
+            {
+                Config.SetUsedTexture(inst, type, format, flags, TextureOperation.DefaultCbufSlot, handle);
+            }
+
+            return new TextureOperation(inst, type, format, flags, handle, compIndex, dest, sources);
+        }
+
         public void FlagAttributeRead(int attribute)
         {
             if (Config.Stage == ShaderStage.Vertex && attribute == AttributeConsts.InstanceId)
@@ -88,6 +120,11 @@ namespace Ryujinx.Graphics.Shader.Translation
                         Config.SetClipDistanceWritten((attribute - AttributeConsts.ClipDistance0) / 4);
                         break;
                 }
+            }
+
+            if (Config.Stage != ShaderStage.Fragment && attribute == AttributeConsts.Layer)
+            {
+                Config.SetUsedFeature(FeatureFlags.RtLayer);
             }
         }
 
@@ -170,6 +207,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                     if (target.Enabled)
                     {
+                        Config.SetOutputUserAttribute(rtIndex);
                         regIndexBase += 4;
                     }
                 }

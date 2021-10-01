@@ -11,6 +11,7 @@ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Keyboard;
 using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.DebugPad;
 using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.TouchScreen;
 using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Npad;
+using Ryujinx.HLE.HOS.Kernel.Memory;
 
 namespace Ryujinx.HLE.HOS.Services.Hid
 {
@@ -18,9 +19,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
     {
         private readonly Switch _device;
 
-        private readonly ulong _hidMemoryAddress;
+        private readonly SharedMemoryStorage _storage;
 
-        internal ref SharedMemory SharedMemory => ref _device.Memory.GetRef<SharedMemory>(_hidMemoryAddress);
+        internal ref SharedMemory SharedMemory => ref _storage.GetRef<SharedMemory>(0);
 
         internal const int SharedMemEntryCount = 17;
 
@@ -48,10 +49,10 @@ namespace Ryujinx.HLE.HOS.Services.Hid
             CheckTypeSizeOrThrow<SharedMemory>(Horizon.HidSize);
         }
 
-        public Hid(in Switch device, ulong sharedHidMemoryAddress)
+        internal Hid(in Switch device, SharedMemoryStorage storage)
         {
-            _device           = device;
-            _hidMemoryAddress = sharedHidMemoryAddress;
+            _device  = device;
+            _storage = storage;
 
             SharedMemory = SharedMemory.Create();
         }
@@ -65,7 +66,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
             Npads       = new NpadDevices(_device, true);
         }
 
-        internal void RefreshInputConfig(List<InputConfig> inputConfig)
+        public void RefreshInputConfig(List<InputConfig> inputConfig)
         {
             ControllerConfig[] npadConfig = new ControllerConfig[inputConfig.Count];
 
@@ -76,11 +77,6 @@ namespace Ryujinx.HLE.HOS.Services.Hid
             }
 
             _device.Hid.Npads.Configure(npadConfig);
-        }
-
-        internal void RefreshInputConfigEvent(object _, ReactiveEventArgs<List<InputConfig>> args)
-        {
-            RefreshInputConfig(args.NewValue);
         }
 
         public ControllerKeys UpdateStickButtons(JoystickPosition leftStick, JoystickPosition rightStick)

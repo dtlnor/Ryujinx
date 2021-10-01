@@ -1,4 +1,3 @@
-using Ryujinx.Common;
 using Ryujinx.Cpu.Tracking;
 using Ryujinx.Graphics.Gpu.Memory;
 using System;
@@ -15,6 +14,8 @@ namespace Ryujinx.Graphics.Gpu.Image
         protected const int DescriptorSize = 0x20;
 
         protected GpuContext Context;
+        protected PhysicalMemory PhysicalMemory;
+        protected int SequenceNumber;
 
         protected T1[] Items;
         protected T2[] DescriptorCache;
@@ -40,9 +41,17 @@ namespace Ryujinx.Graphics.Gpu.Image
         private readonly CpuMultiRegionHandle _memoryTracking;
         private readonly Action<ulong, ulong> _modifiedDelegate;
 
-        public Pool(GpuContext context, ulong address, int maximumId)
+        /// <summary>
+        /// Creates a new instance of the GPU resource pool.
+        /// </summary>
+        /// <param name="context">GPU context that the pool belongs to</param>
+        /// <param name="physicalMemory">Physical memory where the resource descriptors are mapped</param>
+        /// <param name="address">Address of the pool in physical memory</param>
+        /// <param name="maximumId">Maximum index of an item on the pool (inclusive)</param>
+        public Pool(GpuContext context, PhysicalMemory physicalMemory, ulong address, int maximumId)
         {
-            Context   = context;
+            Context = context;
+            PhysicalMemory = physicalMemory;
             MaximumId = maximumId;
 
             int count = maximumId + 1;
@@ -55,10 +64,10 @@ namespace Ryujinx.Graphics.Gpu.Image
             Address = address;
             Size    = size;
 
-            _memoryTracking = context.PhysicalMemory.BeginGranularTracking(address, size);
+            _memoryTracking = physicalMemory.BeginGranularTracking(address, size);
+            _memoryTracking.RegisterPreciseAction(address, size, PreciseAction);
             _modifiedDelegate = RegionModified;
         }
-
 
         /// <summary>
         /// Gets the descriptor for a given ID.
@@ -67,7 +76,7 @@ namespace Ryujinx.Graphics.Gpu.Image
         /// <returns>The descriptor</returns>
         public T2 GetDescriptor(int id)
         {
-            return Context.PhysicalMemory.Read<T2>(Address + (ulong)id * DescriptorSize);
+            return PhysicalMemory.Read<T2>(Address + (ulong)id * DescriptorSize);
         }
 
         /// <summary>
@@ -107,6 +116,23 @@ namespace Ryujinx.Graphics.Gpu.Image
             }
 
             InvalidateRangeImpl(mAddress, mSize);
+        }
+
+        /// <summary>
+        /// An action to be performed when a precise memory access occurs to this resource.
+        /// Makes sure that the dirty flags are checked.
+        /// </summary>
+        /// <param name="address">Address of the memory action</param>
+        /// <param name="size">Size in bytes</param>
+        /// <param name="write">True if the access was a write, false otherwise</param>
+        private bool PreciseAction(ulong address, ulong size, bool write)
+        {
+            if (write && Context.SequenceNumber == SequenceNumber)
+            {
+                SequenceNumber--;
+            }
+
+            return false;
         }
 
         protected abstract void InvalidateRangeImpl(ulong address, ulong size);

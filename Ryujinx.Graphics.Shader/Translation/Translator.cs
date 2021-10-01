@@ -3,7 +3,9 @@ using Ryujinx.Graphics.Shader.Decoders;
 using Ryujinx.Graphics.Shader.IntermediateRepresentation;
 using Ryujinx.Graphics.Shader.StructuredIr;
 using Ryujinx.Graphics.Shader.Translation.Optimizations;
+using System;
 using System.Collections.Generic;
+using System.Numerics;
 
 using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
 
@@ -26,12 +28,12 @@ namespace Ryujinx.Graphics.Shader.Translation
         public static TranslatorContext CreateContext(
             ulong address,
             IGpuAccessor gpuAccessor,
-            TranslationFlags flags,
+            TranslationOptions options,
             TranslationCounts counts = null)
         {
             counts ??= new TranslationCounts();
 
-            Block[][] cfg = DecodeShader(address, gpuAccessor, flags, counts, out ShaderConfig config);
+            Block[][] cfg = DecodeShader(address, gpuAccessor, options, counts, out ShaderConfig config);
 
             return new TranslatorContext(address, cfg, config);
         }
@@ -87,63 +89,65 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             StructuredProgramInfo sInfo = StructuredProgram.MakeStructuredProgram(funcs, config);
 
-            GlslProgram program = GlslGenerator.Generate(sInfo, config);
+            ShaderProgram program;
+
+            switch (config.Options.TargetLanguage)
+            {
+                case TargetLanguage.Glsl:
+                    program = new ShaderProgram(config.Stage, GlslGenerator.Generate(sInfo, config));
+                    break;
+                default:
+                    throw new NotImplementedException(config.Options.TargetLanguage.ToString());
+            }
 
             shaderProgramInfo = new ShaderProgramInfo(
-                program.CBufferDescriptors,
-                program.SBufferDescriptors,
-                program.TextureDescriptors,
-                program.ImageDescriptors,
+                config.GetConstantBufferDescriptors(),
+                config.GetStorageBufferDescriptors(),
+                config.GetTextureDescriptors(),
+                config.GetImageDescriptors(),
                 config.UsedFeatures.HasFlag(FeatureFlags.InstanceId),
+                config.UsedFeatures.HasFlag(FeatureFlags.RtLayer),
                 config.ClipDistancesWritten);
 
-            string glslCode = program.Code;
-
-            return new ShaderProgram(config.Stage, glslCode);
+            return program;
         }
 
         private static Block[][] DecodeShader(
             ulong address,
             IGpuAccessor gpuAccessor,
-            TranslationFlags flags,
+            TranslationOptions options,
             TranslationCounts counts,
             out ShaderConfig config)
         {
             Block[][] cfg;
             ulong maxEndAddress = 0;
 
-            bool hasBindless = false;
-
-            if ((flags & TranslationFlags.Compute) != 0)
+            if ((options.Flags & TranslationFlags.Compute) != 0)
             {
-                config = new ShaderConfig(gpuAccessor, flags, counts);
+                config = new ShaderConfig(gpuAccessor, options, counts);
 
-                cfg = Decoder.Decode(gpuAccessor, address, out hasBindless);
+                cfg = Decoder.Decode(config, address);
             }
             else
             {
-                config = new ShaderConfig(new ShaderHeader(gpuAccessor, address), gpuAccessor, flags, counts);
+                config = new ShaderConfig(new ShaderHeader(gpuAccessor, address), gpuAccessor, options, counts);
 
-                cfg = Decoder.Decode(gpuAccessor, address + HeaderSize, out hasBindless);
+                cfg = Decoder.Decode(config, address + HeaderSize);
             }
 
-            if (hasBindless)
+            for (int funcIndex = 0; funcIndex < cfg.Length; funcIndex++)
             {
-                config.SetUsedFeature(FeatureFlags.Bindless);
-            }
-            else // Not bindless, fill up texture handles
-            {
-                for (int funcIndex = 0; funcIndex < cfg.Length; funcIndex++)
+                for (int blkIndex = 0; blkIndex < cfg[funcIndex].Length; blkIndex++)
                 {
-                    for (int blkIndex = 0; blkIndex < cfg[funcIndex].Length; blkIndex++)
+                    Block block = cfg[funcIndex][blkIndex];
+
+                    if (maxEndAddress < block.EndAddress)
                     {
-                        Block block = cfg[funcIndex][blkIndex];
+                        maxEndAddress = block.EndAddress;
+                    }
 
-                        if (maxEndAddress < block.EndAddress)
-                        {
-                            maxEndAddress = block.EndAddress;
-                        }
-
+                    if (!config.UsedFeatures.HasFlag(FeatureFlags.Bindless))
+                    {
                         for (int index = 0; index < block.OpCodes.Count; index++)
                         {
                             if (block.OpCodes[index] is OpCodeTextureBase texture)
@@ -155,13 +159,15 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
             }
 
-            config.SizeAdd((int)maxEndAddress + (flags.HasFlag(TranslationFlags.Compute) ? 0 : HeaderSize));
+            config.SizeAdd((int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : HeaderSize));
 
             return cfg;
         }
 
-        internal static FunctionCode[] EmitShader(Block[][] cfg, ShaderConfig config)
+        internal static FunctionCode[] EmitShader(Block[][] cfg, ShaderConfig config, bool initializeOutputs, out int initializationOperations)
         {
+            initializationOperations = 0;
+
             Dictionary<ulong, int> funcIds = new Dictionary<ulong, int>();
 
             for (int funcIndex = 0; funcIndex < cfg.Length; funcIndex++)
@@ -174,6 +180,12 @@ namespace Ryujinx.Graphics.Shader.Translation
             for (int funcIndex = 0; funcIndex < cfg.Length; funcIndex++)
             {
                 EmitterContext context = new EmitterContext(config, funcIndex != 0, funcIds);
+
+                if (initializeOutputs && funcIndex == 0)
+                {
+                    EmitOutputsInitialization(context, config);
+                    initializationOperations = context.OperationsCount;
+                }
 
                 for (int blkIndex = 0; blkIndex < cfg[funcIndex].Length; blkIndex++)
                 {
@@ -192,13 +204,46 @@ namespace Ryujinx.Graphics.Shader.Translation
             return funcs.ToArray();
         }
 
+        private static void EmitOutputsInitialization(EmitterContext context, ShaderConfig config)
+        {
+            // Compute has no output attributes, and fragment is the last stage, so we
+            // don't need to initialize outputs on those stages.
+            if (config.Stage == ShaderStage.Compute || config.Stage == ShaderStage.Fragment)
+            {
+                return;
+            }
+
+            void InitializeOutput(int baseAttr)
+            {
+                for (int c = 0; c < 4; c++)
+                {
+                    context.Copy(Attribute(baseAttr + c * 4), ConstF(c == 3 ? 1f : 0f));
+                }
+            }
+
+            if (config.Stage == ShaderStage.Vertex)
+            {
+                InitializeOutput(AttributeConsts.PositionX);
+            }
+
+            int usedAttribtes = context.Config.UsedOutputAttributes;
+            while (usedAttribtes != 0)
+            {
+                int index = BitOperations.TrailingZeroCount(usedAttribtes);
+
+                InitializeOutput(AttributeConsts.UserAttributeBase + index * 16);
+
+                usedAttribtes &= ~(1 << index);
+            }
+        }
+
         private static void EmitOps(EmitterContext context, Block block)
         {
             for (int opIndex = 0; opIndex < block.OpCodes.Count; opIndex++)
             {
                 OpCode op = block.OpCodes[opIndex];
 
-                if ((context.Config.Flags & TranslationFlags.DebugMode) != 0)
+                if ((context.Config.Options.Flags & TranslationFlags.DebugMode) != 0)
                 {
                     string instName;
 

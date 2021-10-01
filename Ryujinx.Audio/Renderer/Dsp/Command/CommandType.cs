@@ -44,6 +44,10 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
         Reverb3d,
         Performance,
         ClearMixBuffer,
-        CopyMixBuffer
+        CopyMixBuffer,
+        LimiterVersion1,
+        LimiterVersion2,
+        GroupedBiquadFilter,
+        CaptureBuffer
     }
 }

@@ -6,11 +6,15 @@ namespace Ryujinx.Graphics.GAL
 {
     public interface IRenderer : IDisposable
     {
+        event EventHandler<ScreenCaptureImageInfo> ScreenCaptured;
+
+        bool PreferThreading { get; }
+
         IPipeline Pipeline { get; }
 
         IWindow Window { get; }
 
-        void BackgroundContextAction(Action action);
+        void BackgroundContextAction(Action action, bool alwaysBackground = false);
 
         IShader CompileShader(ShaderStage stage, string code);
 
@@ -25,7 +29,7 @@ namespace Ryujinx.Graphics.GAL
 
         void DeleteBuffer(BufferHandle buffer);
 
-        byte[] GetBufferData(BufferHandle buffer, int offset, int size);
+        ReadOnlySpan<byte> GetBufferData(BufferHandle buffer, int offset, int size);
 
         Capabilities GetCapabilities();
 
@@ -37,12 +41,19 @@ namespace Ryujinx.Graphics.GAL
 
         void PreFrame();
 
-        ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler);
+        ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler, bool hostReserved);
 
         void ResetCounter(CounterType type);
+
+        void RunLoop(Action gpuLoop)
+        {
+            gpuLoop();
+        }
 
         void WaitSync(ulong id);
 
         void Initialize(GraphicsDebugLevel logLevel);
+
+        void Screenshot();
     }
 }

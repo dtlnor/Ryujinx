@@ -3,7 +3,7 @@ using Ryujinx.Audio.Common;
 using Ryujinx.Audio.Integration;
 using Ryujinx.Memory;
 using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
 using static Ryujinx.Audio.Integration.IHardwareDeviceDriver;
@@ -12,11 +12,11 @@ namespace Ryujinx.Audio.Backends.OpenAL
 {
     public class OpenALHardwareDeviceDriver : IHardwareDeviceDriver
     {
-        private object _lock = new object();
-        private ALDevice _device;
-        private ALContext _context;
-        private ManualResetEvent _updateRequiredEvent;
-        private List<OpenALHardwareDeviceSession> _sessions;
+        private readonly ALDevice _device;
+        private readonly ALContext _context;
+        private readonly ManualResetEvent _updateRequiredEvent;
+        private readonly ManualResetEvent _pauseEvent;
+        private readonly ConcurrentDictionary<OpenALHardwareDeviceSession, byte> _sessions;
         private bool _stillRunning;
         private Thread _updaterThread;
 
@@ -25,7 +25,8 @@ namespace Ryujinx.Audio.Backends.OpenAL
             _device = ALC.OpenDevice("");
             _context = ALC.CreateContext(_device, new ALContextAttributes());
             _updateRequiredEvent = new ManualResetEvent(false);
-            _sessions = new List<OpenALHardwareDeviceSession>();
+            _pauseEvent = new ManualResetEvent(true);
+            _sessions = new ConcurrentDictionary<OpenALHardwareDeviceSession, byte>();
 
             _stillRunning = true;
             _updaterThread = new Thread(Update)
@@ -72,27 +73,26 @@ namespace Ryujinx.Audio.Backends.OpenAL
                 throw new ArgumentException($"{channelCount}");
             }
 
-            lock (_lock)
-            {
-                OpenALHardwareDeviceSession session = new OpenALHardwareDeviceSession(this, memoryManager, sampleFormat, sampleRate, channelCount);
+            OpenALHardwareDeviceSession session = new OpenALHardwareDeviceSession(this, memoryManager, sampleFormat, sampleRate, channelCount);
 
-                _sessions.Add(session);
+            _sessions.TryAdd(session, 0);
 
-                return session;
-            }
+            return session;
         }
 
-        internal void Unregister(OpenALHardwareDeviceSession session)
+        internal bool Unregister(OpenALHardwareDeviceSession session)
         {
-            lock (_lock)
-            {
-                _sessions.Remove(session);
-            }
+            return _sessions.TryRemove(session, out _);
         }
 
         public ManualResetEvent GetUpdateRequiredEvent()
         {
             return _updateRequiredEvent;
+        }
+
+        public ManualResetEvent GetPauseEvent()
+        {
+            return _pauseEvent;
         }
 
         private void Update()
@@ -103,14 +103,11 @@ namespace Ryujinx.Audio.Backends.OpenAL
             {
                 bool updateRequired = false;
 
-                lock (_lock)
+                foreach (OpenALHardwareDeviceSession session in _sessions.Keys)
                 {
-                    foreach (OpenALHardwareDeviceSession session in _sessions)
+                    if (session.Update())
                     {
-                        if (session.Update())
-                        {
-                            updateRequired = true;
-                        }
+                        updateRequired = true;
                     }
                 }
 
@@ -133,22 +130,17 @@ namespace Ryujinx.Audio.Backends.OpenAL
         {
             if (disposing)
             {
-                lock (_lock)
+                _stillRunning = false;
+
+                foreach (OpenALHardwareDeviceSession session in _sessions.Keys)
                 {
-                    _stillRunning = false;
-                    _updaterThread.Join();
-
-                    // Loop against all sessions to dispose them (they will unregister themself)
-                    while (_sessions.Count > 0)
-                    {
-                        OpenALHardwareDeviceSession session = _sessions[0];
-
-                        session.Dispose();
-                    }
+                    session.Dispose();
                 }
 
                 ALC.DestroyContext(_context);
                 ALC.CloseDevice(_device);
+
+                _pauseEvent.Dispose();
             }
         }
 

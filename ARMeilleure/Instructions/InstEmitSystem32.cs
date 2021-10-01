@@ -6,7 +6,7 @@ using System;
 using System.Reflection;
 
 using static ARMeilleure.Instructions.InstEmitHelper;
-using static ARMeilleure.IntermediateRepresentation.OperandHelper;
+using static ARMeilleure.IntermediateRepresentation.Operand.Factory;
 
 namespace ARMeilleure.Instructions
 {
@@ -167,6 +167,45 @@ namespace ARMeilleure.Instructions
 
             SetIntA32(context, op.Rt, context.ConvertI64ToI32(result));
             SetIntA32(context, op.CRn, context.ConvertI64ToI32(context.ShiftRightUI(result, Const(32))));
+        }
+
+        public static void Msr(ArmEmitterContext context)
+        {
+            OpCode32MsrReg op = (OpCode32MsrReg)context.CurrOp;
+
+            if (op.R)
+            {
+                throw new NotImplementedException("SPSR");
+            }
+            else
+            {
+                if ((op.Mask & 8) != 0)
+                {
+                    Operand value = GetIntA32(context, op.Rn);
+
+                    EmitSetNzcv(context, value);
+
+                    Operand q = context.ShiftRightUI(value, Const((int)PState.QFlag));
+                    q = context.BitwiseAnd(q, Const(1));
+
+                    SetFlag(context, PState.QFlag, q);
+                }
+
+                if ((op.Mask & 4) != 0)
+                {
+                    throw new NotImplementedException("APSR_g");
+                }
+
+                if ((op.Mask & 2) != 0)
+                {
+                    throw new NotImplementedException("CPSR_x");
+                }
+
+                if ((op.Mask & 1) != 0)
+                {
+                    throw new NotImplementedException("CPSR_c");
+                }
+            }
         }
 
         public static void Nop(ArmEmitterContext context) { }

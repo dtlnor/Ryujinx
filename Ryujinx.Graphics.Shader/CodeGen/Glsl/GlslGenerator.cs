@@ -12,7 +12,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
     {
         private const string MainFunctionName = "main";
 
-        public static GlslProgram Generate(StructuredProgramInfo info, ShaderConfig config)
+        public static string Generate(StructuredProgramInfo info, ShaderConfig config)
         {
             CodeGenContext context = new CodeGenContext(info, config);
 
@@ -37,12 +37,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
 
             PrintFunction(context, info, info.Functions[0], MainFunctionName);
 
-            return new GlslProgram(
-                context.CBufferDescriptors.ToArray(),
-                context.SBufferDescriptors.ToArray(),
-                context.TextureDescriptors.ToArray(),
-                context.ImageDescriptors.ToArray(),
-                context.GetCode());
+            return context.GetCode();
         }
 
         private static void PrintFunction(CodeGenContext context, StructuredProgramInfo info, StructuredFunction function, string funcName = null)
@@ -53,46 +48,6 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
             context.EnterScope();
 
             Declarations.DeclareLocals(context, function);
-
-            if (funcName == MainFunctionName)
-            {
-                // Some games will leave some elements of gl_Position uninitialized,
-                // in those cases, the elements will contain undefined values according
-                // to the spec, but on NVIDIA they seems to be always initialized to (0, 0, 0, 1),
-                // so we do explicit initialization to avoid UB on non-NVIDIA gpus.
-                if (context.Config.Stage == ShaderStage.Vertex)
-                {
-                    context.AppendLine("gl_Position = vec4(0.0, 0.0, 0.0, 1.0);");
-                }
-
-                // Ensure that unused attributes are set, otherwise the downstream
-                // compiler may eliminate them.
-                // (Not needed for fragment shader as it is the last stage).
-                if (context.Config.Stage != ShaderStage.Compute &&
-                    context.Config.Stage != ShaderStage.Fragment &&
-                    !context.Config.GpPassthrough)
-                {
-                    for (int attr = 0; attr < Declarations.MaxAttributes; attr++)
-                    {
-                        if (info.OAttributes.Contains(attr))
-                        {
-                            continue;
-                        }
-
-                        if ((context.Config.Flags & TranslationFlags.Feedback) != 0)
-                        {
-                            context.AppendLine($"{DefaultNames.OAttributePrefix}{attr}_x = 0;");
-                            context.AppendLine($"{DefaultNames.OAttributePrefix}{attr}_y = 0;");
-                            context.AppendLine($"{DefaultNames.OAttributePrefix}{attr}_z = 0;");
-                            context.AppendLine($"{DefaultNames.OAttributePrefix}{attr}_w = 0;");
-                        }
-                        else
-                        {
-                            context.AppendLine($"{DefaultNames.OAttributePrefix}{attr} = vec4(0);");
-                        }
-                    }
-                }
-            }
 
             PrintBlock(context, function.MainBlock);
 
@@ -173,7 +128,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
 
                     if (assignment.Destination is AstOperand operand && operand.Type == OperandType.Attribute)
                     {
-                        dest = OperandManager.GetOutAttributeName(operand, context.Config);
+                        dest = OperandManager.GetOutAttributeName(operand.Value, context.Config);
                     }
                     else
                     {

@@ -1,6 +1,7 @@
 ﻿using Ryujinx.Memory.Range;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 namespace Ryujinx.Memory.Tracking
@@ -11,6 +12,17 @@ namespace Ryujinx.Memory.Tracking
     /// </summary>
     public class RegionHandle : IRegionHandle, IRange
     {
+        /// <summary>
+        /// If more than this number of checks have been performed on a dirty flag since its last reprotect,
+        /// then it is dirtied infrequently.
+        /// </summary>
+        private static int CheckCountForInfrequent = 3;
+
+        /// <summary>
+        /// Number of frequent dirty/consume in a row to make this handle volatile.
+        /// </summary>
+        private static int VolatileThreshold = 5;
+
         public bool Dirty { get; private set; }
         public bool Unmapped { get; private set; }
 
@@ -23,12 +35,37 @@ namespace Ryujinx.Memory.Tracking
 
         private event Action _onDirty;
 
+        private object _preActionLock = new object();
         private RegionSignal _preAction; // Action to perform before a read or write. This will block the memory access.
+        private PreciseRegionSignal _preciseAction; // Action to perform on a precise read or write.
         private readonly List<VirtualRegion> _regions;
         private readonly MemoryTracking _tracking;
         private bool _disposed;
 
-        internal MemoryPermission RequiredPermission => _preAction != null ? MemoryPermission.None : (Dirty ? MemoryPermission.ReadAndWrite : MemoryPermission.Read);
+        private int _checkCount = 0;
+        private int _volatileCount = 0;
+        private bool _volatile;
+
+        internal MemoryPermission RequiredPermission
+        {
+            get
+            {
+                // If this is unmapped, allow reprotecting as RW as it can't be dirtied.
+                // This is required for the partial unmap cases where part of the data are still being accessed.
+                if (Unmapped)
+                {
+                    return MemoryPermission.ReadAndWrite;
+                }
+
+                if (_preAction != null)
+                {
+                    return MemoryPermission.None;
+                }
+
+                return Dirty ? MemoryPermission.ReadAndWrite : MemoryPermission.Read;
+            }
+        }
+
         internal RegionSignal PreAction => _preAction;
 
         /// <summary>
@@ -56,13 +93,67 @@ namespace Ryujinx.Memory.Tracking
         }
 
         /// <summary>
+        /// Clear the volatile state of this handle.
+        /// </summary>
+        private void ClearVolatile()
+        {
+            _volatileCount = 0;
+            _volatile = false;
+        }
+
+        /// <summary>
+        /// Check if this handle is dirty, or if it is volatile. (changes very often)
+        /// </summary>
+        /// <returns>True if the handle is dirty or volatile, false otherwise</returns>
+        public bool DirtyOrVolatile()
+        {
+            _checkCount++;
+            return Dirty || _volatile;
+        }
+
+        /// <summary>
         /// Signal that a memory action occurred within this handle's virtual regions.
         /// </summary>
+        /// <param name="address">Address accessed</param>
+        /// <param name="size">Size of the region affected in bytes</param>
         /// <param name="write">Whether the region was written to or read</param>
-        internal void Signal(ulong address, ulong size, bool write)
+        /// <param name="handleIterable">Reference to the handles being iterated, in case the list needs to be copied</param>
+        internal void Signal(ulong address, ulong size, bool write, ref IList<RegionHandle> handleIterable)
         {
-            RegionSignal action = Interlocked.Exchange(ref _preAction, null);
-            action?.Invoke(address, size);
+            // If this handle was already unmapped (even if just partially),
+            // then we have nothing to do until it is mapped again.
+            // The pre-action should be still consumed to avoid flushing on remap.
+            if (Unmapped)
+            {
+                Interlocked.Exchange(ref _preAction, null);
+                return;
+            }
+
+            if (_preAction != null)
+            {
+                // Copy the handles list in case it changes when we're out of the lock.
+                if (handleIterable is List<RegionHandle>)
+                {
+                    handleIterable = handleIterable.ToArray();
+                }
+
+                // Temporarily release the tracking lock while we're running the action.
+                Monitor.Exit(_tracking.TrackingLock);
+
+                try
+                {
+                    lock (_preActionLock)
+                    {
+                        _preAction?.Invoke(address, size);
+
+                        _preAction = null;
+                    }
+                }
+                finally
+                {
+                    Monitor.Enter(_tracking.TrackingLock);
+                }
+            }
 
             if (write)
             {
@@ -77,17 +168,76 @@ namespace Ryujinx.Memory.Tracking
         }
 
         /// <summary>
+        /// Signal that a precise memory action occurred within this handle's virtual regions.
+        /// If there is no precise action, or the action returns false, the normal signal handler will be called.
+        /// </summary>
+        /// <param name="address">Address accessed</param>
+        /// <param name="size">Size of the region affected in bytes</param>
+        /// <param name="write">Whether the region was written to or read</param>
+        /// <param name="handleIterable">Reference to the handles being iterated, in case the list needs to be copied</param>
+        /// <returns>True if a precise action was performed and returned true, false otherwise</returns>
+        internal bool SignalPrecise(ulong address, ulong size, bool write, ref IList<RegionHandle> handleIterable)
+        {
+            if (!Unmapped && _preciseAction != null && _preciseAction(address, size, write))
+            {
+                return true;
+            }
+
+            Signal(address, size, write, ref handleIterable);
+
+            return false;
+        }
+
+        /// <summary>
+        /// Force this handle to be dirty, without reprotecting.
+        /// </summary>
+        public void ForceDirty()
+        {
+            Dirty = true;
+        }
+
+        /// <summary>
         /// Consume the dirty flag for this handle, and reprotect so it can be set on the next write.
         /// </summary>
         public void Reprotect(bool asDirty = false)
         {
+            if (_volatile) return;
+
             Dirty = asDirty;
+
+            bool protectionChanged = false;
+
             lock (_tracking.TrackingLock)
             {
                 foreach (VirtualRegion region in _regions)
                 {
-                    region.UpdateProtection();
+                    protectionChanged |= region.UpdateProtection();
                 }
+            }
+
+            if (!protectionChanged)
+            {
+                // Counteract the check count being incremented when this handle was forced dirty.
+                // It doesn't count for protected write tracking.
+
+                _checkCount--;
+            }
+            else if (!asDirty)
+            {
+                if (_checkCount > 0 && _checkCount < CheckCountForInfrequent)
+                {
+                    if (++_volatileCount >= VolatileThreshold && _preAction == null)
+                    {
+                        _volatile = true;
+                        return;
+                    }
+                }
+                else
+                {
+                    _volatileCount = 0;
+                }
+
+                _checkCount = 0;
             }
         }
 
@@ -98,17 +248,34 @@ namespace Ryujinx.Memory.Tracking
         /// <param name="action">Action to call on read or write</param>
         public void RegisterAction(RegionSignal action)
         {
-            RegionSignal lastAction = Interlocked.Exchange(ref _preAction, action);
-            if (lastAction == null && action != lastAction)
+            ClearVolatile();
+
+            lock (_preActionLock)
             {
-                lock (_tracking.TrackingLock)
+                RegionSignal lastAction = _preAction;
+                _preAction = action;
+
+                if (lastAction == null && action != lastAction)
                 {
-                    foreach (VirtualRegion region in _regions)
+                    lock (_tracking.TrackingLock)
                     {
-                        region.UpdateProtection();
+                        foreach (VirtualRegion region in _regions)
+                        {
+                            region.UpdateProtection();
+                        }
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Register an action to perform when a precise access occurs (one with exact address and size).
+        /// If the action returns true, read/write tracking are skipped.
+        /// </summary>
+        /// <param name="action">Action to call on read or write</param>
+        public void RegisterPreciseAction(PreciseRegionSignal action)
+        {
+            _preciseAction = action;
         }
 
         /// <summary>
@@ -142,6 +309,7 @@ namespace Ryujinx.Memory.Tracking
 
                 if (Unmapped)
                 {
+                    ClearVolatile();
                     Dirty = false;
                 }
             }

@@ -1,6 +1,7 @@
+using ARMeilleure.CodeGen.Linking;
 using ARMeilleure.IntermediateRepresentation;
-using ARMeilleure.Translation.PTC;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 
@@ -61,12 +62,12 @@ namespace ARMeilleure.CodeGen.X86
             }
         }
 
-        private static InstructionInfo[] _instTable;
+        private readonly static InstructionInfo[] _instTable;
 
-        private Stream _stream;
+        private readonly Stream _stream;
 
-        private PtcInfo _ptcInfo;
-        private bool    _ptcDisabled;
+        public List<RelocEntry> Relocs { get; }
+        public bool HasRelocs => Relocs != null;
 
         static Assembler()
         {
@@ -294,12 +295,10 @@ namespace ARMeilleure.CodeGen.X86
             _instTable[(int)inst] = info;
         }
 
-        public Assembler(Stream stream, PtcInfo ptcInfo = null)
+        public Assembler(Stream stream, bool relocatable)
         {
             _stream = stream;
-
-            _ptcInfo     = ptcInfo;
-            _ptcDisabled = ptcInfo == null;
+            Relocs = relocatable ? new List<RelocEntry>() : null;
         }
 
         public void Add(Operand dest, Operand source, OperandType type)
@@ -329,12 +328,12 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Bswap(Operand dest)
         {
-            WriteInstruction(dest, null, dest.Type, X86Instruction.Bswap);
+            WriteInstruction(dest, default, dest.Type, X86Instruction.Bswap);
         }
 
         public void Call(Operand dest)
         {
-            WriteInstruction(dest, null, OperandType.None, X86Instruction.Call);
+            WriteInstruction(dest, default, OperandType.None, X86Instruction.Call);
         }
 
         public void Cdq()
@@ -346,7 +345,7 @@ namespace ARMeilleure.CodeGen.X86
         {
             InstructionInfo info = _instTable[(int)X86Instruction.Cmovcc];
 
-            WriteOpCode(dest, null, source, type, info.Flags, info.OpRRM | (int)condition, rrm: true);
+            WriteOpCode(dest, default, source, type, info.Flags, info.OpRRM | (int)condition, rrm: true);
         }
 
         public void Cmp(Operand src1, Operand src2, OperandType type)
@@ -360,30 +359,38 @@ namespace ARMeilleure.CodeGen.X86
             WriteByte(0x99);
         }
 
-        public void Cmpxchg(MemoryOperand memOp, Operand src)
+        public void Cmpxchg(Operand memOp, Operand src)
         {
+            Debug.Assert(memOp.Kind == OperandKind.Memory);
+
             WriteByte(LockPrefix);
 
             WriteInstruction(memOp, src, src.Type, X86Instruction.Cmpxchg);
         }
 
-        public void Cmpxchg16(MemoryOperand memOp, Operand src)
+        public void Cmpxchg16(Operand memOp, Operand src)
         {
+            Debug.Assert(memOp.Kind == OperandKind.Memory);
+
             WriteByte(LockPrefix);
             WriteByte(0x66);
 
             WriteInstruction(memOp, src, src.Type, X86Instruction.Cmpxchg);
         }
 
-        public void Cmpxchg16b(MemoryOperand memOp)
+        public void Cmpxchg16b(Operand memOp)
         {
+            Debug.Assert(memOp.Kind == OperandKind.Memory);
+
             WriteByte(LockPrefix);
 
-            WriteInstruction(memOp, null, OperandType.None, X86Instruction.Cmpxchg16b);
+            WriteInstruction(memOp, default, OperandType.None, X86Instruction.Cmpxchg16b);
         }
 
-        public void Cmpxchg8(MemoryOperand memOp, Operand src)
+        public void Cmpxchg8(Operand memOp, Operand src)
         {
+            Debug.Assert(memOp.Kind == OperandKind.Memory);
+
             WriteByte(LockPrefix);
 
             WriteInstruction(memOp, src, src.Type, X86Instruction.Cmpxchg8);
@@ -391,12 +398,12 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Comisd(Operand src1, Operand src2)
         {
-            WriteInstruction(src1, null, src2, X86Instruction.Comisd);
+            WriteInstruction(src1, default, src2, X86Instruction.Comisd);
         }
 
         public void Comiss(Operand src1, Operand src2)
         {
-            WriteInstruction(src1, null, src2, X86Instruction.Comiss);
+            WriteInstruction(src1, default, src2, X86Instruction.Comiss);
         }
 
         public void Cvtsd2ss(Operand dest, Operand src1, Operand src2)
@@ -421,7 +428,7 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Div(Operand source)
         {
-            WriteInstruction(null, source, source.Type, X86Instruction.Div);
+            WriteInstruction(default, source, source.Type, X86Instruction.Div);
         }
 
         public void Divsd(Operand dest, Operand src1, Operand src2)
@@ -436,12 +443,12 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Idiv(Operand source)
         {
-            WriteInstruction(null, source, source.Type, X86Instruction.Idiv);
+            WriteInstruction(default, source, source.Type, X86Instruction.Idiv);
         }
 
         public void Imul(Operand source)
         {
-            WriteInstruction(null, source, source.Type, X86Instruction.Imul128);
+            WriteInstruction(default, source, source.Type, X86Instruction.Imul128);
         }
 
         public void Imul(Operand dest, Operand source, OperandType type)
@@ -465,13 +472,13 @@ namespace ARMeilleure.CodeGen.X86
 
             if (IsImm8(src2.Value, src2.Type) && info.OpRMImm8 != BadOp)
             {
-                WriteOpCode(dest, null, src1, type, info.Flags, info.OpRMImm8, rrm: true);
+                WriteOpCode(dest, default, src1, type, info.Flags, info.OpRMImm8, rrm: true);
 
                 WriteByte(src2.AsByte());
             }
             else if (IsImm32(src2.Value, src2.Type) && info.OpRMImm32 != BadOp)
             {
-                WriteOpCode(dest, null, src1, type, info.Flags, info.OpRMImm32, rrm: true);
+                WriteOpCode(dest, default, src1, type, info.Flags, info.OpRMImm32, rrm: true);
 
                 WriteInt32(src2.AsInt32());
             }
@@ -490,7 +497,7 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Jcc(X86Condition condition, long offset)
         {
-            if (_ptcDisabled && ConstFitsOnS8(offset))
+            if (!HasRelocs && ConstFitsOnS8(offset))
             {
                 WriteByte((byte)(0x70 | (int)condition));
 
@@ -511,7 +518,7 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Jmp(long offset)
         {
-            if (_ptcDisabled && ConstFitsOnS8(offset))
+            if (!HasRelocs && ConstFitsOnS8(offset))
             {
                 WriteByte(0xeb);
 
@@ -531,12 +538,12 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Jmp(Operand dest)
         {
-            WriteInstruction(dest, null, OperandType.None, X86Instruction.Jmp);
+            WriteInstruction(dest, default, OperandType.None, X86Instruction.Jmp);
         }
 
         public void Ldmxcsr(Operand dest)
         {
-            WriteInstruction(dest, null, OperandType.I32, X86Instruction.Ldmxcsr);
+            WriteInstruction(dest, default, OperandType.I32, X86Instruction.Ldmxcsr);
         }
 
         public void Lea(Operand dest, Operand source, OperandType type)
@@ -565,17 +572,17 @@ namespace ARMeilleure.CodeGen.X86
 
             if (source.Type.IsInteger() || source.Kind == OperandKind.Memory)
             {
-                WriteOpCode(dest, null, source, OperandType.None, info.Flags, info.OpRRM, rrm: true);
+                WriteOpCode(dest, default, source, OperandType.None, info.Flags, info.OpRRM, rrm: true);
             }
             else
             {
-                WriteOpCode(dest, null, source, OperandType.None, info.Flags, info.OpRMR);
+                WriteOpCode(dest, default, source, OperandType.None, info.Flags, info.OpRMR);
             }
         }
 
         public void Movdqu(Operand dest, Operand source)
         {
-            WriteInstruction(dest, null, source, X86Instruction.Movdqu);
+            WriteInstruction(dest, default, source, X86Instruction.Movdqu);
         }
 
         public void Movhlps(Operand dest, Operand src1, Operand src2)
@@ -596,11 +603,11 @@ namespace ARMeilleure.CodeGen.X86
 
             if (source.Type.IsInteger() || source.Kind == OperandKind.Memory)
             {
-                WriteOpCode(dest, null, source, OperandType.None, flags, info.OpRRM, rrm: true);
+                WriteOpCode(dest, default, source, OperandType.None, flags, info.OpRRM, rrm: true);
             }
             else if (dest.Type.IsInteger() || dest.Kind == OperandKind.Memory)
             {
-                WriteOpCode(dest, null, source, OperandType.None, flags, info.OpRMR);
+                WriteOpCode(dest, default, source, OperandType.None, flags, info.OpRMR);
             }
             else
             {
@@ -645,7 +652,7 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Mul(Operand source)
         {
-            WriteInstruction(null, source, source.Type, X86Instruction.Mul128);
+            WriteInstruction(default, source, source.Type, X86Instruction.Mul128);
         }
 
         public void Mulsd(Operand dest, Operand src1, Operand src2)
@@ -660,12 +667,12 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Neg(Operand dest)
         {
-            WriteInstruction(dest, null, dest.Type, X86Instruction.Neg);
+            WriteInstruction(dest, default, dest.Type, X86Instruction.Neg);
         }
 
         public void Not(Operand dest)
         {
-            WriteInstruction(dest, null, dest.Type, X86Instruction.Not);
+            WriteInstruction(dest, default, dest.Type, X86Instruction.Not);
         }
 
         public void Or(Operand dest, Operand source, OperandType type)
@@ -675,7 +682,7 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Pclmulqdq(Operand dest, Operand source, byte imm)
         {
-            WriteInstruction(dest, null, source, X86Instruction.Pclmulqdq);
+            WriteInstruction(dest, default, source, X86Instruction.Pclmulqdq);
 
             WriteByte(imm);
         }
@@ -687,28 +694,28 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Pextrb(Operand dest, Operand source, byte imm)
         {
-            WriteInstruction(dest, null, source, X86Instruction.Pextrb);
+            WriteInstruction(dest, default, source, X86Instruction.Pextrb);
 
             WriteByte(imm);
         }
 
         public void Pextrd(Operand dest, Operand source, byte imm)
         {
-            WriteInstruction(dest, null, source, X86Instruction.Pextrd);
+            WriteInstruction(dest, default, source, X86Instruction.Pextrd);
 
             WriteByte(imm);
         }
 
         public void Pextrq(Operand dest, Operand source, byte imm)
         {
-            WriteInstruction(dest, null, source, X86Instruction.Pextrq);
+            WriteInstruction(dest, default, source, X86Instruction.Pextrq);
 
             WriteByte(imm);
         }
 
         public void Pextrw(Operand dest, Operand source, byte imm)
         {
-            WriteInstruction(dest, null, source, X86Instruction.Pextrw);
+            WriteInstruction(dest, default, source, X86Instruction.Pextrw);
 
             WriteByte(imm);
         }
@@ -749,7 +756,7 @@ namespace ARMeilleure.CodeGen.X86
             }
             else
             {
-                WriteInstruction(dest, null, dest.Type, X86Instruction.Pop);
+                WriteInstruction(dest, default, dest.Type, X86Instruction.Pop);
             }
         }
 
@@ -760,7 +767,7 @@ namespace ARMeilleure.CodeGen.X86
 
         public void Pshufd(Operand dest, Operand source, byte imm)
         {
-            WriteInstruction(dest, null, source, X86Instruction.Pshufd);
+            WriteInstruction(dest, default, source, X86Instruction.Pshufd);
 
             WriteByte(imm);
         }
@@ -773,7 +780,7 @@ namespace ARMeilleure.CodeGen.X86
             }
             else
             {
-                WriteInstruction(null, source, source.Type, X86Instruction.Push);
+                WriteInstruction(default, source, source.Type, X86Instruction.Push);
             }
         }
 
@@ -806,12 +813,12 @@ namespace ARMeilleure.CodeGen.X86
         {
             InstructionInfo info = _instTable[(int)X86Instruction.Setcc];
 
-            WriteOpCode(dest, null, null, OperandType.None, info.Flags, info.OpRRM | (int)condition);
+            WriteOpCode(dest, default, default, OperandType.None, info.Flags, info.OpRRM | (int)condition);
         }
 
         public void Stmxcsr(Operand dest)
         {
-            WriteInstruction(dest, null, OperandType.I32, X86Instruction.Stmxcsr);
+            WriteInstruction(dest, default, OperandType.I32, X86Instruction.Stmxcsr);
         }
 
         public void Sub(Operand dest, Operand source, OperandType type)
@@ -850,7 +857,7 @@ namespace ARMeilleure.CodeGen.X86
             Operand source,
             OperandType type = OperandType.None)
         {
-            WriteInstruction(dest, null, source, inst, type);
+            WriteInstruction(dest, default, source, inst, type);
         }
 
         public void WriteInstruction(X86Instruction inst, Operand dest, Operand src1, Operand src2)
@@ -877,7 +884,7 @@ namespace ARMeilleure.CodeGen.X86
 
         public void WriteInstruction(X86Instruction inst, Operand dest, Operand source, byte imm)
         {
-            WriteInstruction(dest, null, source, inst);
+            WriteInstruction(dest, default, source, inst);
 
             WriteByte(imm);
         }
@@ -917,11 +924,11 @@ namespace ARMeilleure.CodeGen.X86
 
                 Debug.Assert(shiftReg == X86Register.Rcx, $"Invalid shift register \"{shiftReg}\".");
 
-                source = null;
+                source = default;
             }
             else if (source.Kind == OperandKind.Constant)
             {
-                source = source.With((int)source.Value & (dest.Type == OperandType.I32 ? 0x1f : 0x3f));
+                source = Operand.Factory.Const((int)source.Value & (dest.Type == OperandType.I32 ? 0x1f : 0x3f));
             }
 
             WriteInstruction(dest, source, type, inst);
@@ -931,7 +938,7 @@ namespace ARMeilleure.CodeGen.X86
         {
             InstructionInfo info = _instTable[(int)inst];
 
-            if (source != null)
+            if (source != default)
             {
                 if (source.Kind == OperandKind.Constant)
                 {
@@ -939,32 +946,30 @@ namespace ARMeilleure.CodeGen.X86
 
                     if (inst == X86Instruction.Mov8)
                     {
-                        WriteOpCode(dest, null, null, type, info.Flags, info.OpRMImm8);
+                        WriteOpCode(dest, default, default, type, info.Flags, info.OpRMImm8);
 
                         WriteByte((byte)imm);
                     }
                     else if (inst == X86Instruction.Mov16)
                     {
-                        WriteOpCode(dest, null, null, type, info.Flags, info.OpRMImm32);
+                        WriteOpCode(dest, default, default, type, info.Flags, info.OpRMImm32);
 
                         WriteInt16((short)imm);
                     }
                     else if (IsImm8(imm, type) && info.OpRMImm8 != BadOp)
                     {
-                        WriteOpCode(dest, null, null, type, info.Flags, info.OpRMImm8);
+                        WriteOpCode(dest, default, default, type, info.Flags, info.OpRMImm8);
 
                         WriteByte((byte)imm);
                     }
                     else if (!source.Relocatable && IsImm32(imm, type) && info.OpRMImm32 != BadOp)
                     {
-                        WriteOpCode(dest, null, null, type, info.Flags, info.OpRMImm32);
+                        WriteOpCode(dest, default, default, type, info.Flags, info.OpRMImm32);
 
                         WriteInt32((int)imm);
                     }
-                    else if (dest?.Kind == OperandKind.Register && info.OpRImm64 != BadOp)
+                    else if (dest != default && dest.Kind == OperandKind.Register && info.OpRImm64 != BadOp)
                     {
-                        int? index = source.PtcIndex;
-
                         int rexPrefix = GetRexPrefix(dest, source, type, rrm: false);
 
                         if (rexPrefix != 0)
@@ -974,9 +979,9 @@ namespace ARMeilleure.CodeGen.X86
 
                         WriteByte((byte)(info.OpRImm64 + (dest.GetRegister().Index & 0b111)));
 
-                        if (_ptcInfo != null && index != null)
+                        if (HasRelocs && source.Relocatable)
                         {
-                            _ptcInfo.WriteRelocEntry(new RelocEntry((int)_stream.Position, (int)index));
+                            Relocs.Add(new RelocEntry((int)_stream.Position, source.Symbol));
                         }
 
                         WriteUInt64(imm);
@@ -988,11 +993,11 @@ namespace ARMeilleure.CodeGen.X86
                 }
                 else if (source.Kind == OperandKind.Register && info.OpRMR != BadOp)
                 {
-                    WriteOpCode(dest, null, source, type, info.Flags, info.OpRMR);
+                    WriteOpCode(dest, default, source, type, info.Flags, info.OpRMR);
                 }
                 else if (info.OpRRM != BadOp)
                 {
-                    WriteOpCode(dest, null, source, type, info.Flags, info.OpRRM, rrm: true);
+                    WriteOpCode(dest, default, source, type, info.Flags, info.OpRRM, rrm: true);
                 }
                 else
                 {
@@ -1001,11 +1006,11 @@ namespace ARMeilleure.CodeGen.X86
             }
             else if (info.OpRRM != BadOp)
             {
-                WriteOpCode(dest, null, source, type, info.Flags, info.OpRRM, rrm: true);
+                WriteOpCode(dest, default, source, type, info.Flags, info.OpRRM, rrm: true);
             }
             else if (info.OpRMR != BadOp)
             {
-                WriteOpCode(dest, null, source, type, info.Flags, info.OpRMR);
+                WriteOpCode(dest, default, source, type, info.Flags, info.OpRMR);
             }
             else
             {
@@ -1022,7 +1027,7 @@ namespace ARMeilleure.CodeGen.X86
         {
             InstructionInfo info = _instTable[(int)inst];
 
-            if (src2 != null)
+            if (src2 != default)
             {
                 if (src2.Kind == OperandKind.Constant)
                 {
@@ -1030,7 +1035,7 @@ namespace ARMeilleure.CodeGen.X86
 
                     if ((byte)imm == imm && info.OpRMImm8 != BadOp)
                     {
-                        WriteOpCode(dest, src1, null, type, info.Flags, info.OpRMImm8);
+                        WriteOpCode(dest, src1, default, type, info.Flags, info.OpRMImm8);
 
                         WriteByte((byte)imm);
                     }
@@ -1084,9 +1089,10 @@ namespace ARMeilleure.CodeGen.X86
 
             int modRM = (opCode >> OpModRMBits) << 3;
 
-            MemoryOperand memOp = null;
+            MemoryOperand memOp = default;
+            bool hasMemOp = false;
 
-            if (dest != null)
+            if (dest != default)
             {
                 if (dest.Kind == OperandKind.Register)
                 {
@@ -1101,7 +1107,8 @@ namespace ARMeilleure.CodeGen.X86
                 }
                 else if (dest.Kind == OperandKind.Memory)
                 {
-                    memOp = dest as MemoryOperand;
+                    memOp = dest.GetMemory();
+                    hasMemOp = true;
                 }
                 else
                 {
@@ -1109,7 +1116,7 @@ namespace ARMeilleure.CodeGen.X86
                 }
             }
 
-            if (src2 != null)
+            if (src2 != default)
             {
                 if (src2.Kind == OperandKind.Register)
                 {
@@ -1122,9 +1129,10 @@ namespace ARMeilleure.CodeGen.X86
                         rexPrefix |= RexPrefix;
                     }
                 }
-                else if (src2.Kind == OperandKind.Memory && memOp == null)
+                else if (src2.Kind == OperandKind.Memory && !hasMemOp)
                 {
-                    memOp = src2 as MemoryOperand;
+                    memOp = src2.GetMemory();
+                    hasMemOp = true;
                 }
                 else
                 {
@@ -1137,14 +1145,14 @@ namespace ARMeilleure.CodeGen.X86
 
             int sib = 0;
 
-            if (memOp != null)
+            if (hasMemOp)
             {
                 // Either source or destination is a memory operand.
                 Register baseReg = memOp.BaseAddress.GetRegister();
 
                 X86Register baseRegLow = (X86Register)(baseReg.Index & 0b111);
 
-                needsSibByte      = memOp.Index != null     || baseRegLow == X86Register.Rsp;
+                needsSibByte      = memOp.Index != default  || baseRegLow == X86Register.Rsp;
                 needsDisplacement = memOp.Displacement != 0 || baseRegLow == X86Register.Rbp;
 
                 if (needsDisplacement)
@@ -1170,7 +1178,7 @@ namespace ARMeilleure.CodeGen.X86
                 {
                     sib = (int)baseRegLow;
 
-                    if (memOp.Index != null)
+                    if (memOp.Index != default)
                     {
                         int indexReg = memOp.Index.GetRegister().Index;
 
@@ -1219,7 +1227,7 @@ namespace ARMeilleure.CodeGen.X86
                     _ => 0
                 };
 
-                if (src1 != null)
+                if (src1 != default)
                 {
                     vexByte2 |= (src1.GetRegister().Index ^ 0xf) << 3;
                 }
@@ -1286,7 +1294,7 @@ namespace ARMeilleure.CodeGen.X86
                 }
             }
 
-            if (dest != null && (flags & InstructionFlags.RegOnly) != 0)
+            if (dest != default && (flags & InstructionFlags.RegOnly) != 0)
             {
                 opCode += dest.GetRegister().Index & 7;
             }
@@ -1355,12 +1363,12 @@ namespace ARMeilleure.CodeGen.X86
                 }
             }
 
-            if (dest != null && dest.Kind == OperandKind.Register)
+            if (dest != default && dest.Kind == OperandKind.Register)
             {
                 SetRegisterHighBit(dest.GetRegister(), rrm ? 2 : 0);
             }
 
-            if (source != null && source.Kind == OperandKind.Register)
+            if (source != default && source.Kind == OperandKind.Register)
             {
                 SetRegisterHighBit(source.GetRegister(), rrm ? 0 : 2);
             }
@@ -1387,9 +1395,9 @@ namespace ARMeilleure.CodeGen.X86
             return ConstFitsOnS32(value);
         }
 
-        public static int GetJccLength(long offset, bool ptcDisabled = true)
+        public static int GetJccLength(long offset, bool relocatable = false)
         {
-            if (ptcDisabled && ConstFitsOnS8(offset < 0 ? offset - 2 : offset))
+            if (!relocatable && ConstFitsOnS8(offset < 0 ? offset - 2 : offset))
             {
                 return 2;
             }
@@ -1403,9 +1411,9 @@ namespace ARMeilleure.CodeGen.X86
             }
         }
 
-        public static int GetJmpLength(long offset, bool ptcDisabled = true)
+        public static int GetJmpLength(long offset, bool relocatable = false)
         {
-            if (ptcDisabled && ConstFitsOnS8(offset < 0 ? offset - 2 : offset))
+            if (!relocatable && ConstFitsOnS8(offset < 0 ? offset - 2 : offset))
             {
                 return 2;
             }

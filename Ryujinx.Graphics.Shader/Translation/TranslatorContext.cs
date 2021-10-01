@@ -38,7 +38,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                    operand.Value < AttributeConsts.UserAttributeEnd;
         }
 
-        private static FunctionCode[] Combine(FunctionCode[] a, FunctionCode[] b)
+        private static FunctionCode[] Combine(FunctionCode[] a, FunctionCode[] b, int aStart)
         {
             // Here we combine two shaders.
             // For shader A:
@@ -57,7 +57,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             Operand lblB = Label();
 
-            for (int index = 0; index < a[0].Code.Length; index++)
+            for (int index = aStart; index < a[0].Code.Length; index++)
             {
                 Operation operation = a[0].Code[index];
 
@@ -126,16 +126,27 @@ namespace Ryujinx.Graphics.Shader.Translation
             return output;
         }
 
-        public ShaderProgram Translate(out ShaderProgramInfo shaderProgramInfo, TranslatorContext other = null)
+        public ShaderProgram Translate(
+            out ShaderProgramInfo shaderProgramInfo,
+            TranslatorContext nextStage = null,
+            TranslatorContext other = null)
         {
-            FunctionCode[] code = EmitShader(_cfg, _config);
+            if (nextStage != null)
+            {
+                _config.MergeOutputUserAttributes(nextStage._config.UsedInputAttributes);
+            }
+
+            FunctionCode[] code = EmitShader(_cfg, _config, initializeOutputs: other == null, out _);
 
             if (other != null)
             {
-                _config.SetUsedFeature(other._config.UsedFeatures);
-                TextureHandlesForCache.UnionWith(other.TextureHandlesForCache);
+                other._config.MergeOutputUserAttributes(_config.UsedOutputAttributes);
 
-                code = Combine(EmitShader(other._cfg, other._config), code);
+                FunctionCode[] otherCode = EmitShader(other._cfg, other._config, initializeOutputs: true, out int aStart);
+
+                code = Combine(otherCode, code, aStart);
+
+                _config.InheritFrom(other._config);
             }
 
             return Translator.Translate(code, _config, out shaderProgramInfo);

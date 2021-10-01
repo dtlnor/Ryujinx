@@ -2,6 +2,9 @@ using Ryujinx.Common.Logging;
 using Ryujinx.HLE.HOS.Ipc;
 using Ryujinx.HLE.HOS.Kernel.Common;
 using Ryujinx.HLE.HOS.Kernel.Threading;
+using Ryujinx.HLE.HOS.Services.Settings.Types;
+using Ryujinx.HLE.HOS.Services.Vi.RootService.ApplicationDisplayService;
+using Ryujinx.HLE.HOS.SystemState;
 using System;
 
 namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.SystemAppletProxy
@@ -50,7 +53,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // ReceiveMessage() -> nn::am::AppletMessage
         public ResultCode ReceiveMessage(ServiceCtx context)
         {
-            if (!context.Device.System.AppletState.Messages.TryDequeue(out MessageInfo message))
+            if (!context.Device.System.AppletState.Messages.TryDequeue(out AppletMessage message))
             {
                 return ResultCode.NoMessages;
             }
@@ -191,8 +194,12 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // GetDefaultDisplayResolution() -> (u32, u32)
         public ResultCode GetDefaultDisplayResolution(ServiceCtx context)
         {
-            context.ResponseData.Write(1280);
-            context.ResponseData.Write(720);
+            // NOTE: Original service calls IOperationModeManager::GetDefaultDisplayResolution of omm service.
+            //       IOperationModeManager::GetDefaultDisplayResolution of omm service call IManagerDisplayService::GetDisplayResolution of vi service.
+            (ulong width, ulong height) = AndroidSurfaceComposerClient.GetDisplayInfo(context);
+
+            context.ResponseData.Write((uint)width);
+            context.ResponseData.Write((uint)height);
 
             return ResultCode.Success;
         }
@@ -201,6 +208,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // GetDefaultDisplayResolutionChangeEvent() -> handle<copy>
         public ResultCode GetDefaultDisplayResolutionChangeEvent(ServiceCtx context)
         {
+            // NOTE: Original service calls IOperationModeManager::GetDefaultDisplayResolutionChangeEvent of omm service.
             if (_displayResolutionChangedEventHandle == 0)
             {
                 if (context.Process.HandleTable.GenerateHandle(context.Device.System.DisplayResolutionChangeEvent.ReadableEvent, out _displayResolutionChangedEventHandle) != KernelResult.Success)
@@ -239,6 +247,18 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         public ResultCode GetCurrentPerformanceConfiguration(ServiceCtx context)
         {
             return (ResultCode)_apmSystemManagerServer.GetCurrentPerformanceConfiguration(context);
+        }
+
+        [CommandHipc(300)] // 9.0.0+
+        // GetSettingsPlatformRegion() -> u8
+        public ResultCode GetSettingsPlatformRegion(ServiceCtx context)
+        {
+            PlatformRegion platformRegion = context.Device.System.State.DesiredRegionCode == (uint)RegionCode.China ? PlatformRegion.China : PlatformRegion.Global;
+
+            // FIXME: Call set:sys GetPlatformRegion
+            context.ResponseData.Write((byte)platformRegion);
+
+            return ResultCode.Success;
         }
 
         [CommandHipc(900)] // 11.0.0+

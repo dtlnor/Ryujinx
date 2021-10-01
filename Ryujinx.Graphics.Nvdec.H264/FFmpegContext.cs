@@ -1,34 +1,74 @@
 ﻿using FFmpeg.AutoGen;
 using Ryujinx.Common.Logging;
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace Ryujinx.Graphics.Nvdec.H264
 {
     unsafe class FFmpegContext : IDisposable
     {
-        private readonly av_log_set_callback_callback _logFunc;
+        private readonly AVCodec_decode _h264Decode;
+        private static readonly av_log_set_callback_callback _logFunc;
         private readonly AVCodec* _codec;
         private AVPacket* _packet;
         private AVCodecContext* _context;
 
         public FFmpegContext()
         {
-            _logFunc = Log;
-
-            // Redirect log output
-            ffmpeg.av_log_set_level(ffmpeg.AV_LOG_MAX_OFFSET);
-            ffmpeg.av_log_set_callback(_logFunc);
-
             _codec = ffmpeg.avcodec_find_decoder(AVCodecID.AV_CODEC_ID_H264);
             _context = ffmpeg.avcodec_alloc_context3(_codec);
+            _context->debug |= ffmpeg.FF_DEBUG_MMCO;
 
             ffmpeg.avcodec_open2(_context, _codec, null);
 
             _packet = ffmpeg.av_packet_alloc();
+
+            _h264Decode = Marshal.GetDelegateForFunctionPointer<AVCodec_decode>(_codec->decode.Pointer);
         }
 
-        private void Log(void* p0, int level, string format, byte* vl)
+        static FFmpegContext()
+        {
+            SetRootPath();
+
+            _logFunc = Log;
+
+            // Redirect log output.
+            ffmpeg.av_log_set_level(ffmpeg.AV_LOG_MAX_OFFSET);
+            ffmpeg.av_log_set_callback(_logFunc);
+        }
+
+        private static void SetRootPath()
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                // Configure FFmpeg search path
+                Process lddProcess = Process.Start(new ProcessStartInfo
+                {
+                    FileName               = "/bin/sh",
+                    Arguments              = "-c \"ldd $(which ffmpeg 2>/dev/null) | grep libavfilter\" 2>/dev/null",
+                    UseShellExecute        = false,
+                    RedirectStandardOutput = true
+                });
+
+                string lddOutput = lddProcess.StandardOutput.ReadToEnd();
+
+                lddProcess.WaitForExit();
+                lddProcess.Close();
+
+                if (lddOutput.Contains(" => "))
+                {
+                    ffmpeg.RootPath = Path.GetDirectoryName(lddOutput.Split(" => ")[1]);
+                }
+                else
+                {
+                    Logger.Error?.PrintMsg(LogClass.FFmpeg, "FFmpeg wasn't found. Make sure that you have it installed and up to date.");
+                }
+            }
+        }
+
+        private static void Log(void* p0, int level, string format, byte* vl)
         {
             if (level > ffmpeg.av_log_get_level())
             {
@@ -66,23 +106,40 @@ namespace Ryujinx.Graphics.Nvdec.H264
 
         public int DecodeFrame(Surface output, ReadOnlySpan<byte> bitstream)
         {
-            // Ensure the packet is clean before proceeding
-            ffmpeg.av_packet_unref(_packet);
+            int result;
+            int gotFrame;
 
             fixed (byte* ptr = bitstream)
             {
                 _packet->data = ptr;
                 _packet->size = bitstream.Length;
-
-                int rc = ffmpeg.avcodec_send_packet(_context, _packet);
-
-                if (rc != 0)
-                {
-                    return rc;
-                }
+                result = _h264Decode(_context, output.Frame, &gotFrame, _packet);
             }
 
-            return ffmpeg.avcodec_receive_frame(_context, output.Frame);
+            if (gotFrame == 0)
+            {
+                ffmpeg.av_frame_unref(output.Frame);
+
+                // If the frame was not delivered, it was probably delayed.
+                // Get the next delayed frame by passing a 0 length packet.
+                _packet->data = null;
+                _packet->size = 0;
+                result = _h264Decode(_context, output.Frame, &gotFrame, _packet);
+
+                // We need to set B frames to 0 as we already consumed all delayed frames.
+                // This prevents the decoder from trying to return a delayed frame next time.
+                _context->has_b_frames = 0;
+            }
+
+            ffmpeg.av_packet_unref(_packet);
+
+            if (gotFrame == 0)
+            {
+                ffmpeg.av_frame_unref(output.Frame);
+                return -1;
+            }
+
+            return result < 0 ? result : 0;
         }
 
         public void Dispose()

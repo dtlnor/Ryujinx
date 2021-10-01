@@ -1,4 +1,4 @@
-using OpenTK.Graphics;
+﻿using OpenTK.Graphics;
 using OpenTK.Graphics.OpenGL;
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
@@ -28,6 +28,10 @@ namespace Ryujinx.Graphics.OpenGL
 
         private Sync _sync;
 
+        public event EventHandler<ScreenCaptureImageInfo> ScreenCaptured;
+
+        internal PersistentBuffers PersistentBuffers { get; }
+
         internal ResourcePool ResourcePool { get; }
 
         internal int BufferCount { get; private set; }
@@ -35,6 +39,8 @@ namespace Ryujinx.Graphics.OpenGL
         public string GpuVendor { get; private set; }
         public string GpuRenderer { get; private set; }
         public string GpuVersion { get; private set; }
+
+        public bool PreferThreading => true;
 
         public Renderer()
         {
@@ -44,6 +50,7 @@ namespace Ryujinx.Graphics.OpenGL
             _textureCopy = new TextureCopy(this);
             _backgroundTextureCopy = new TextureCopy(this);
             _sync = new Sync();
+            PersistentBuffers = new PersistentBuffers();
             ResourcePool = new ResourcePool();
         }
 
@@ -86,18 +93,24 @@ namespace Ryujinx.Graphics.OpenGL
             Buffer.Delete(buffer);
         }
 
-        public byte[] GetBufferData(BufferHandle buffer, int offset, int size)
+        public ReadOnlySpan<byte> GetBufferData(BufferHandle buffer, int offset, int size)
         {
-            return Buffer.GetData(buffer, offset, size);
+            return Buffer.GetData(this, buffer, offset, size);
         }
 
         public Capabilities GetCapabilities()
         {
             return new Capabilities(
+                HwCapabilities.Vendor == HwCapabilities.GpuVendor.IntelWindows,
+                HwCapabilities.Vendor == HwCapabilities.GpuVendor.AmdWindows,
                 HwCapabilities.SupportsAstcCompression,
                 HwCapabilities.SupportsImageLoadFormatted,
+                HwCapabilities.SupportsMismatchingViewFormat,
                 HwCapabilities.SupportsNonConstantTextureOffset,
+                HwCapabilities.SupportsShaderBallot,
+                HwCapabilities.SupportsTextureShadowLod,
                 HwCapabilities.SupportsViewportSwizzle,
+                HwCapabilities.SupportsIndirectParameters,
                 HwCapabilities.MaximumComputeSharedMemorySize,
                 HwCapabilities.MaximumSupportedAnisotropy,
                 HwCapabilities.StorageBufferOffsetAlignment);
@@ -119,9 +132,9 @@ namespace Ryujinx.Graphics.OpenGL
             ResourcePool.Tick();
         }
 
-        public ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler)
+        public ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler, bool hostReserved)
         {
-            return _counters.QueueReport(type, resultHandler, _pipeline.DrawCount);
+            return _counters.QueueReport(type, resultHandler, _pipeline.DrawCount, hostReserved);
         }
 
         public void Initialize(GraphicsDebugLevel glLogLevel)
@@ -130,6 +143,12 @@ namespace Ryujinx.Graphics.OpenGL
 
             PrintGpuInformation();
 
+            if (HwCapabilities.SupportsParallelShaderCompile)
+            {
+                GL.Arb.MaxShaderCompilerThreads(Math.Min(Environment.ProcessorCount, 8));
+            }
+
+            _pipeline.Initialize();
             _counters.Initialize();
         }
 
@@ -147,8 +166,10 @@ namespace Ryujinx.Graphics.OpenGL
             _counters.QueueReset(type);
         }
 
-        public void BackgroundContextAction(Action action)
+        public void BackgroundContextAction(Action action, bool alwaysBackground = false)
         {
+            // alwaysBackground is ignored, since we cannot switch from the current context.
+
             if (IOpenGLContext.HasContext())
             {
                 action(); // We have a context already - use that (assuming it is the main one).
@@ -168,6 +189,7 @@ namespace Ryujinx.Graphics.OpenGL
         {
             _textureCopy.Dispose();
             _backgroundTextureCopy.Dispose();
+            PersistentBuffers.Dispose();
             ResourcePool.Dispose();
             _pipeline.Dispose();
             _window.Dispose();
@@ -177,16 +199,7 @@ namespace Ryujinx.Graphics.OpenGL
 
         public IProgram LoadProgramBinary(byte[] programBinary)
         {
-            Program program = new Program(programBinary);
-
-            if (program.IsLinked)
-            {
-                return program;
-            }
-
-            program.Dispose();
-
-            return null;
+            return new Program(programBinary);
         }
 
         public void CreateSync(ulong id)
@@ -197,6 +210,16 @@ namespace Ryujinx.Graphics.OpenGL
         public void WaitSync(ulong id)
         {
             _sync.Wait(id);
+        }
+
+        public void Screenshot()
+        {
+            _window.ScreenCaptureRequested = true;
+        }
+
+        public void OnScreenCaptured(ScreenCaptureImageInfo bitmap)
+        {
+            ScreenCaptured?.Invoke(this, bitmap);
         }
     }
 }

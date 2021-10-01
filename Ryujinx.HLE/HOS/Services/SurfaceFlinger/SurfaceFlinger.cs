@@ -1,6 +1,5 @@
 ﻿using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
-using Ryujinx.Configuration;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu;
 using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvMap;
@@ -50,8 +49,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
         private class TextureCallbackInformation
         {
-            public Layer        Layer;
-            public BufferItem   Item;
+            public Layer      Layer;
+            public BufferItem Item;
         }
 
         public SurfaceFlinger(Switch device)
@@ -351,7 +350,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             bool flipX = item.Transform.HasFlag(NativeWindowTransform.FlipX);
             bool flipY = item.Transform.HasFlag(NativeWindowTransform.FlipY);
 
-            AspectRatio aspectRatio = ConfigurationState.Instance.Graphics.AspectRatio.Value;
+            AspectRatio aspectRatio = _device.Configuration.AspectRatio;
             bool        isStretched = aspectRatio == AspectRatio.Stretched;
 
             ImageCrop crop = new ImageCrop(
@@ -386,6 +385,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             }
 
             _device.Gpu.Window.EnqueueFrameThreadSafe(
+                layer.Owner,
                 frameBufferAddress,
                 frameBufferWidth,
                 frameBufferHeight,

@@ -176,5 +176,25 @@ namespace Ryujinx.Audio.Renderer.Server
         {
             return 0;
         }
+
+        public uint Estimate(LimiterCommandVersion1 command)
+        {
+            return 0;
+        }
+
+        public uint Estimate(LimiterCommandVersion2 command)
+        {
+            return 0;
+        }
+
+        public uint Estimate(GroupedBiquadFilterCommand command)
+        {
+            return 0;
+        }
+
+        public uint Estimate(CaptureBufferCommand command)
+        {
+            return 0;
+        }
     }
 }

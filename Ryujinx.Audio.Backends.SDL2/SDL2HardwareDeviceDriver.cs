@@ -1,10 +1,9 @@
-﻿using Ryujinx.Audio.Backends.Common;
-using Ryujinx.Audio.Common;
+﻿using Ryujinx.Audio.Common;
 using Ryujinx.Audio.Integration;
 using Ryujinx.Memory;
 using Ryujinx.SDL2.Common;
 using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -15,15 +14,15 @@ namespace Ryujinx.Audio.Backends.SDL2
 {
     public class SDL2HardwareDeviceDriver : IHardwareDeviceDriver
     {
-        private object _lock = new object();
-
-        private ManualResetEvent _updateRequiredEvent;
-        private List<SDL2HardwareDeviceSession> _sessions;
+        private readonly ManualResetEvent _updateRequiredEvent;
+        private readonly ManualResetEvent _pauseEvent;
+        private readonly ConcurrentDictionary<SDL2HardwareDeviceSession, byte> _sessions;
 
         public SDL2HardwareDeviceDriver()
         {
             _updateRequiredEvent = new ManualResetEvent(false);
-            _sessions = new List<SDL2HardwareDeviceSession>();
+            _pauseEvent = new ManualResetEvent(true);
+            _sessions = new ConcurrentDictionary<SDL2HardwareDeviceSession, byte>();
 
             SDL2Driver.Instance.Initialize();
         }
@@ -47,6 +46,11 @@ namespace Ryujinx.Audio.Backends.SDL2
             return _updateRequiredEvent;
         }
 
+        public ManualResetEvent GetPauseEvent()
+        {
+            return _pauseEvent;
+        }
+
         public IHardwareDeviceSession OpenDeviceSession(Direction direction, IVirtualMemoryManager memoryManager, SampleFormat sampleFormat, uint sampleRate, uint channelCount)
         {
             if (channelCount == 0)
@@ -64,22 +68,16 @@ namespace Ryujinx.Audio.Backends.SDL2
                 throw new NotImplementedException("Input direction is currently not implemented on SDL2 backend!");
             }
 
-            lock (_lock)
-            {
-                SDL2HardwareDeviceSession session = new SDL2HardwareDeviceSession(this, memoryManager, sampleFormat, sampleRate, channelCount);
+            SDL2HardwareDeviceSession session = new SDL2HardwareDeviceSession(this, memoryManager, sampleFormat, sampleRate, channelCount);
 
-                _sessions.Add(session);
+            _sessions.TryAdd(session, 0);
 
-                return session;
-            }
+            return session;
         }
 
-        internal void Unregister(SDL2HardwareDeviceSession session)
+        internal bool Unregister(SDL2HardwareDeviceSession session)
         {
-            lock (_lock)
-            {
-                _sessions.Remove(session);
-            }
+            return _sessions.TryRemove(session, out _);
         }
 
         private static SDL_AudioSpec GetSDL2Spec(SampleFormat requestedSampleFormat, uint requestedSampleRate, uint requestedChannelCount, uint sampleCount)
@@ -105,23 +103,13 @@ namespace Ryujinx.Audio.Backends.SDL2
             };
         }
 
-        // TODO: Fix this in SDL2-CS.
-        [DllImport("SDL2", EntryPoint = "SDL_OpenAudioDevice", CallingConvention = CallingConvention.Cdecl)]
-        private static extern uint SDL_OpenAudioDevice_Workaround(
-            IntPtr name,
-            int iscapture,
-            ref SDL_AudioSpec desired,
-            out SDL_AudioSpec obtained,
-            uint allowed_changes
-        );
-
         internal static uint OpenStream(SampleFormat requestedSampleFormat, uint requestedSampleRate, uint requestedChannelCount, uint sampleCount, SDL_AudioCallback callback)
         {
             SDL_AudioSpec desired = GetSDL2Spec(requestedSampleFormat, requestedSampleRate, requestedChannelCount, sampleCount);
 
             desired.callback = callback;
 
-            uint device = SDL_OpenAudioDevice_Workaround(IntPtr.Zero, 0, ref desired, out SDL_AudioSpec got, 0);
+            uint device = SDL_OpenAudioDevice(IntPtr.Zero, 0, ref desired, out SDL_AudioSpec got, 0);
 
             if (device == 0)
             {
@@ -149,14 +137,14 @@ namespace Ryujinx.Audio.Backends.SDL2
         {
             if (disposing)
             {
-                while (_sessions.Count > 0)
+                foreach (SDL2HardwareDeviceSession session in _sessions.Keys)
                 {
-                    SDL2HardwareDeviceSession session = _sessions[_sessions.Count - 1];
-
                     session.Dispose();
                 }
 
                 SDL2Driver.Instance.Dispose();
+
+                _pauseEvent.Dispose();
             }
         }
 

@@ -58,15 +58,20 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         {
             Operation operation = (Operation)node.Value;
 
+            bool isAtomic = operation.Inst.IsAtomic();
+            bool isWrite = isAtomic || operation.Inst == Instruction.StoreGlobal;
+
+            config.SetUsedStorageBuffer(storageIndex, isWrite);
+
             Operand GetStorageOffset()
             {
                 Operand addrLow = operation.GetSource(0);
 
-                Operand baseAddrLow = Cbuf(0, GetStorageCbOffset(config.Stage, storageIndex));
+                Operand baseAddrLow = config.CreateCbuf(0, GetStorageCbOffset(config.Stage, storageIndex));
 
                 Operand baseAddrTrunc = Local();
 
-                Operand alignMask = Const(-config.GpuAccessor.QueryStorageBufferOffsetAlignment());
+                Operand alignMask = Const(-config.GpuAccessor.QueryHostStorageBufferOffsetAlignment());
 
                 Operation andOp = new Operation(Instruction.BitwiseAnd, baseAddrTrunc, baseAddrLow, alignMask);
 
@@ -96,7 +101,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Operation storageOp;
 
-            if (operation.Inst.IsAtomic())
+            if (isAtomic)
             {
                 Instruction inst = (operation.Inst & ~Instruction.MrMask) | Instruction.MrStorage;
 
@@ -133,11 +138,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             {
                 Operand addrLow = operation.GetSource(0);
 
-                Operand baseAddrLow = Cbuf(0, UbeBaseOffset + storageIndex * StorageDescSize);
+                Operand baseAddrLow = config.CreateCbuf(0, UbeBaseOffset + storageIndex * StorageDescSize);
 
                 Operand baseAddrTrunc = Local();
 
-                Operand alignMask = Const(-config.GpuAccessor.QueryStorageBufferOffsetAlignment());
+                Operand alignMask = Const(-config.GpuAccessor.QueryHostStorageBufferOffsetAlignment());
 
                 Operation andOp = new Operation(Instruction.BitwiseAnd, baseAddrTrunc, baseAddrLow, alignMask);
 
@@ -157,8 +162,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Operand[] sources = new Operand[operation.SourcesCount];
 
-            sources[0] = Const(UbeFirstCbuf + storageIndex);
+            int cbSlot = UbeFirstCbuf + storageIndex;
+
+            sources[0] = Const(cbSlot);
             sources[1] = GetCbufOffset();
+
+            config.SetUsedConstantBuffer(cbSlot);
 
             for (int index = 2; index < operation.SourcesCount; index++)
             {
